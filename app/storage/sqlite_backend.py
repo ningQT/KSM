@@ -69,6 +69,7 @@ class SQLiteBackend(DatabaseBackend):
         self._record_schema_migration("0001_base_schema", "Base schema tables and indexes")
         self._ensure_account_access_schema()
         self._ensure_notes_search_text_column()
+        self._ensure_ingest_job_metrics_column()
         self._backfill_instance_ontology_enabled()
         fts_recreated = self._migrate_fts_if_needed()
         if fts_recreated:
@@ -220,6 +221,14 @@ class SQLiteBackend(DatabaseBackend):
         self._record_schema_migration(
             "0005_account_access_schema",
             "Added account roles, instance ownership, permissions and API key ownership",
+        )
+
+    def _ensure_ingest_job_metrics_column(self) -> None:
+        """为旧库的写入任务表补齐指标列并记录迁移。"""
+        self._ensure_column("ingest_jobs", "metrics_json", "TEXT NOT NULL DEFAULT '{}'")
+        self._record_schema_migration(
+            "0006_ingest_job_metrics",
+            "Added metrics_json to ingest_jobs",
         )
 
     def _ensure_notes_search_text_column(self) -> None:

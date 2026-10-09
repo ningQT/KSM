@@ -17,7 +17,17 @@
     "modelPlaceholder": "Enter model name",
     "modelExamples": "Examples",
     "temperature": "Temperature: {{value}}",
-    "maxTokens": "Max Tokens"
+    "maxTokens": "Max Tokens",
+    "dimension": "Vector dimension",
+    "batchSize": "Batch size",
+    "getModels": "Get models",
+    "modelsLoading": "Loading models...",
+    "modelsEmpty": "The provider returned no models",
+    "modelsFailed": "Failed to load models",
+    "capabilitySource": "Capability source",
+    "capabilityProvider": "Provider declared",
+    "capabilityHeuristic": "Inferred from model ID",
+    "capabilityUnverified": "Unverified"
   },
   "fieldNames": {
     "provider": "provider",
@@ -65,5 +75,16 @@
     "model": "Model Settings",
     "accounts": "Account Management"
   },
-  "forbidden": "The current account is not allowed to access system settings."
+  "forbidden": "The current account is not allowed to access system settings.",
+  "category": {
+    "label": "Model category",
+    "llm": "LLM model",
+    "embedding": "Embedding model"
+  },
+  "list": {
+    "title": "Model configuration list",
+    "empty": "This category is not configured",
+    "configured": "Configured",
+    "unconfigured": "Not configured"
+  }
 }

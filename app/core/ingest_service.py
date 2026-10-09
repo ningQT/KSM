@@ -13,6 +13,7 @@ from app.schema.validator import SchemaValidator
 from app.storage.database import DatabaseBackend
 from app.storage.filesystem import StorageBackend
 from app.storage.indexer import Indexer
+from app.storage.semantic_index import SemanticIndex
 
 logger = logging.getLogger(__name__)
 
@@ -30,6 +31,7 @@ class IngestService:
         llm: LLMClient,
         settings: Settings,
         indexer: Indexer | None = None,
+        semantic_index: SemanticIndex | None = None,
     ):
         self.db = db
         self.storage = storage
@@ -37,6 +39,7 @@ class IngestService:
         self.settings = settings
         self.indexer = indexer or Indexer(db)
         self.validator = SchemaValidator()
+        self.semantic_index = semantic_index
 
     def ingest_document(
         self,
@@ -91,6 +94,7 @@ class IngestService:
             indexer=self.indexer,
             validator=self.validator,
             settings=self.settings,
+            semantic_index=self.semantic_index,
         )
 
         result = pipeline.execute(
@@ -124,3 +128,50 @@ def _instance_language(config_json: object) -> str:
         config = {}
     language = str(config.get("language") or "zh").strip().lower()
     return language if language in {"zh", "en"} else "zh"
+
+def build_ingest_preflight(settings: Settings) -> dict[str, object]:
+    """Build model configuration preflight data for sync and async ingest.
+
+    Args:
+        settings: Effective runtime settings.
+
+    Returns:
+        A JSON-serializable preflight payload without secrets.
+    """
+    llm_missing = [
+        name
+        for name, value in (
+            ("provider", settings.llm_provider),
+            ("base_url", settings.llm_base_url),
+            ("api_key", settings.llm_api_key),
+            ("model", settings.llm_model),
+        )
+        if not str(value or "").strip()
+    ]
+    embedding_missing = [
+        name
+        for name, value in (
+            ("provider", settings.embedding_provider),
+            ("base_url", settings.effective_embedding_base_url),
+            ("api_key", settings.effective_embedding_api_key),
+            ("model", settings.embedding_model),
+        )
+        if not str(value or "").strip()
+    ]
+    embedding_configured = not embedding_missing
+    dedup_mode = "semantic" if embedding_configured else "rule"
+    if llm_missing:
+        message = "LLM model configuration is required before writing."
+    elif not embedding_configured:
+        message = "Embedding model is not configured; rule deduplication may reduce quality."
+    else:
+        message = "Model configuration is ready."
+    return {
+        "llm_configured": not llm_missing,
+        "embedding_configured": embedding_configured,
+        "dedup_mode": dedup_mode,
+        "requires_rule_dedup_confirmation": not embedding_configured,
+        "missing_fields": sorted(set(llm_missing + embedding_missing)),
+        "message": message,
+        "applies_to": ["sync", "async"],
+    }

@@ -15,6 +15,10 @@
 
 ---
 
+<div align="center">
+  <img src="assets/screenshots/dashboard.png" alt="KSM Web 控制台仪表盘，展示实例、知识统计和写入操作" width="100%">
+</div>
+
 ## 什么是 KSM？
 
 KSM 是一个面向 AI 业务系统的本地知识服务模块。系统以 Obsidian Vault 为底层知识载体，通过标准目录、frontmatter 元数据、Wikilinks 和 SQLite 索引，把原始资料加工成可追溯、可检索、可组织的结构化知识节点。
@@ -25,7 +29,9 @@ KSM 是一个面向 AI 业务系统的本地知识服务模块。系统以 Obsid
 |------|------|
 | **实例管理** | 创建和管理隔离的知识库实例，生成标准 vault 目录结构 |
 | **知识写入** | 将 Markdown 文档加工为资料来源、知识卡片和知识地图 |
-| **异步入库** | SSE 驱动的 8 步管线，支持实时进度追踪 |
+| **异步入库** | SSE 驱动的 8 步管线，展示卡片、实体、关系数量与去重状态 |
+| **写入密度控制** | 按文档预算限制卡片、实体和关系数量，避免大文档生成失控的知识图谱 |
+| **模型配置** | 在 Web 控制台中配置一个 LLM 模型和一个 embedding 模型，并支持获取可用模型 |
 | **关系组织** | 解析和索引知识关系（source_trace、extracted_from、concept_overlap 等） |
 | **结构化检索** | 基于意图的检索，返回 core_hits、related_cards、source_notes 和 maps |
 | **知识图谱** | 基于 React Flow 的交互式可视化，支持三层筛选 |
@@ -41,19 +47,34 @@ KSM 是一个面向 AI 业务系统的本地知识服务模块。系统以 Obsid
 
 ---
 
+## 界面预览
+
+<table>
+  <tr>
+    <td width="50%"><img src="assets/screenshots/graph.png" alt="交互式知识图谱"></td>
+    <td width="50%"><img src="assets/screenshots/knowledge.png" alt="知识库浏览与筛选"></td>
+  </tr>
+  <tr>
+    <td width="50%"><img src="assets/screenshots/ingest.png" alt="写入任务列表，展示卡片、实体、关系和去重指标"></td>
+    <td width="50%"><img src="assets/screenshots/settings.png" alt="LLM 与 embedding 模型配置"></td>
+  </tr>
+</table>
+
+---
+
 ## 快速开始
 
 ### 前置要求
 
 - Python 3.11+
 - Node.js 18+
-- LLM API Key（OpenAI、Anthropic 或兼容服务）
+- 一个 LLM 提供商和一个 embedding 提供商的 API 访问权限（推荐配置 embedding；未配置时会退化为规则去重）
 
 ### 1. 克隆并配置后端
 
 ```bash
-git clone https://github.com/yourname/ksm.git
-cd ksm
+git clone https://github.com/ningQT/Knowledge-Service-Module.git
+cd Knowledge-Service-Module
 
 python -m venv .venv
 source .venv/bin/activate  # Windows: .venv\Scripts\activate
@@ -67,11 +88,7 @@ pip install -r requirements.txt
 uvicorn app.api.app:create_app --factory --host 127.0.0.1 --port 8900
 ```
 
-### 3. 配置 LLM
-
-打开 http://127.0.0.1:8900/settings，在 Web 控制台中配置 LLM 提供商（API Key、模型、端点）。
-
-### 4. 启动前端
+### 3. 启动前端
 
 ```bash
 cd frontend
@@ -81,6 +98,15 @@ npm run dev
 
 打开 http://localhost:5173
 
+### 4. 配置模型
+
+打开 http://localhost:5173/settings，配置：
+
+- **LLM 模型**：用于写入、回答合成和其他模型辅助任务。
+- **embedding 模型**：用于语义去重和向量召回。
+
+模型配置会保存到本地数据库。未配置 embedding 模型时，写入仍会继续，但系统会退化为规则去重，并在界面中提示。
+
 ---
 
 ## Docker 部署
@@ -89,7 +115,7 @@ npm run dev
 docker compose up -d --build
 ```
 
-生产环境配置、备份和回滚请参阅 [docs/production-deployment.md](docs/production-deployment.md)。
+部署时请根据环境配置数据目录、端口和安全参数。模型凭据在 Web 控制台中配置。
 
 ---
 
@@ -101,7 +127,7 @@ docker compose up -d --build
 | **文档入库** | `POST /api/v1/instances/{id}/ingest[/async]` |
 | **知识检索** | `POST /api/v1/search` |
 | **知识图谱** | `GET /api/v1/instances/{id}/graph` |
-| **系统设置** | `GET/PUT /api/v1/settings/llm` |
+| **系统设置** | `GET/PUT /api/v1/settings/models/{category}` |
 
 运行时交互式文档：http://127.0.0.1:8900/docs
 
@@ -111,12 +137,16 @@ docker compose up -d --build
 
 | 页面 | 路径 | 说明 |
 |------|------|------|
-| 仪表盘 | `/` | 实例列表与统计 |
-| 图谱视图 | `/graph` | 知识图谱可视化 |
-| 入库 | `/ingest` | 文档上传，SSE 实时进度 |
+| 仪表盘 | `/` | 实例列表与知识统计 |
+| 知识库 | `/knowledge` | 浏览和筛选来源笔记、知识卡片与地图 |
+| 图谱视图 | `/graph` | 交互式三层知识图谱 |
+| 入库 | `/ingest` | 文档上传、SSE 实时进度和写入任务指标 |
 | 检索 | `/search` | 结构化知识检索 |
+| 检索词典 | `/search-lexicon` | 查询扩展与同义词管理 |
+| 本体管理 | `/ontology` | 实体类型、关系类型和图谱词表 |
+| API 管理 | `/api-management` | API Key 与账户访问控制 |
 | 笔记详情 | `/note/:path` | Markdown 渲染与元数据 |
-| 设置 | `/settings` | LLM 配置管理 |
+| 设置 | `/settings` | LLM 与 embedding 模型配置，以及账户管理 |
 
 支持亮色/暗色主题。
 
@@ -124,7 +154,7 @@ docker compose up -d --build
 
 ## 配置
 
-LLM 设置通过 Web 控制台 `/settings` 页面管理，存储在数据库中。
+LLM 和 embedding 凭据通过 Web 控制台 `/settings` 页面管理，存储在本地数据库中。运行环境相关配置仍由环境变量控制。
 
 主要环境变量：
 
@@ -134,7 +164,7 @@ LLM 设置通过 Web 控制台 `/settings` 页面管理，存储在数据库中�
 | `KSM_PORT` | 否 | `8900` | HTTP 端口 |
 | `KSM_ENABLE_DOCS` | 否 | `true` | 启用 `/docs` 端点 |
 
-完整列表见 [docs/production-deployment.md](docs/production-deployment.md)。
+模型凭据不再通过 `.env` 管理，请在控制台中配置。
 
 ---
 

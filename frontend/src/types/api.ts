@@ -131,17 +131,58 @@ export interface IngestStep {
   summary?: Record<string, unknown>
 }
 
+export interface IngestJobMetrics {
+  card_count: number
+  entity_candidate_count: number
+  relation_count: number
+  dedup_mode: 'semantic' | 'rule' | 'disabled' | string
+  candidate_count: number
+  merged_count: number
+  rejected_count: number
+}
+
 export interface IngestJob {
   job_id: string
   instance_id: string
+  input_file: string
   status: string
+  status_reason: string | null
   steps: IngestStep[]
   created_files: string[]
   generated_cards: string[]
   generated_maps: string[]
   warnings: string[]
+  metrics: IngestJobMetrics
   started_at: string | null
   finished_at: string | null
+}
+
+export interface IngestJobListItem {
+  job_id: string
+  instance_id: string
+  input_file: string
+  status: string
+  status_reason: string | null
+  metrics: IngestJobMetrics
+  warnings: string[]
+  started_at: string | null
+  finished_at: string | null
+}
+
+export interface IngestJobList {
+  items: IngestJobListItem[]
+  limit: number
+  total: number
+}
+
+export interface IngestPreflight {
+  llm_configured: boolean
+  embedding_configured: boolean
+  dedup_mode: 'semantic' | 'rule' | 'disabled' | string
+  requires_rule_dedup_confirmation: boolean
+  missing_fields: string[]
+  message: string
+  applies_to: string[]
 }
 
 export interface CancelJobResponse {
@@ -182,6 +223,59 @@ export interface LLMTestResult {
   success: boolean
   model: string
   latency_ms: number | null
+  error: string | null
+}
+
+export type ModelCategory = 'llm' | 'embedding'
+
+export interface ModelSettings {
+  category: ModelCategory
+  provider: string
+  provider_display_name: string | null
+  base_url: string
+  api_key_masked: string
+  model: string
+  configured: boolean
+  missing_fields: string[]
+  parameters: Record<string, number>
+  provider_options: LLMProviderOption[]
+}
+
+export interface ModelConfigSummary {
+  category: ModelCategory
+  provider: string
+  model: string
+  base_url: string
+  api_key_masked: string
+  configured: boolean
+  missing_fields: string[]
+}
+
+export interface ModelConfigList {
+  items: ModelConfigSummary[]
+  provider_options: LLMProviderOption[]
+}
+
+export interface AvailableModel {
+  id: string
+  display_name: string
+  capabilities: string[]
+  capability_source: 'provider' | 'heuristic' | 'unverified'
+  dimension: number | null
+}
+
+export interface AvailableModels {
+  category: ModelCategory
+  models: AvailableModel[]
+  source: 'provider' | 'examples'
+  warnings: string[]
+}
+
+export interface ModelTestResult {
+  success: boolean
+  model: string
+  latency_ms: number | null
+  dimension: number | null
   error: string | null
 }
 

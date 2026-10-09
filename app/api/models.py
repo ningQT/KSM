@@ -472,17 +472,58 @@ class CancelJobResponse(BaseModel):
     message: str = ""
 
 
+class IngestJobMetrics(BaseModel):
+    card_count: int = 0
+    entity_candidate_count: int = 0
+    relation_count: int = 0
+    dedup_mode: str = "disabled"
+    candidate_count: int = 0
+    merged_count: int = 0
+    rejected_count: int = 0
+
+
 class IngestJobResponse(BaseModel):
     job_id: str
     instance_id: str
+    input_file: str = ""
     status: str
+    status_reason: str | None = None
     steps: list[dict] = Field(default_factory=list)
     created_files: list[str] = Field(default_factory=list)
     generated_cards: list[str] = Field(default_factory=list)
     generated_maps: list[str] = Field(default_factory=list)
     warnings: list[str] = Field(default_factory=list)
+    metrics: IngestJobMetrics = Field(default_factory=IngestJobMetrics)
     started_at: str | None = None
     finished_at: str | None = None
+
+
+class IngestJobListItem(BaseModel):
+    job_id: str
+    instance_id: str
+    input_file: str = ""
+    status: str
+    status_reason: str | None = None
+    metrics: IngestJobMetrics = Field(default_factory=IngestJobMetrics)
+    warnings: list[str] = Field(default_factory=list)
+    started_at: str | None = None
+    finished_at: str | None = None
+
+
+class IngestJobListResponse(BaseModel):
+    items: list[IngestJobListItem] = Field(default_factory=list)
+    limit: int = 20
+    total: int = 0
+
+
+class IngestPreflightResponse(BaseModel):
+    llm_configured: bool
+    embedding_configured: bool
+    dedup_mode: Literal["semantic", "rule", "disabled"] = "disabled"
+    requires_rule_dedup_confirmation: bool = False
+    missing_fields: list[str] = Field(default_factory=list)
+    message: str = ""
+    applies_to: list[str] = Field(default_factory=lambda: ["sync", "async"])
 
 
 # === Phase 3: LLM Settings ===
@@ -544,6 +585,78 @@ class LLMTestResponse(BaseModel):
     model: str
     latency_ms: int | None = None
     error: str | None = None
+
+
+class ModelSettingsRequest(BaseModel):
+    provider: str | None = Field(default=None, max_length=80)
+    base_url: str | None = Field(default=None, max_length=2048)
+    api_key: str | None = Field(default=None, max_length=4096)
+    model: str | None = Field(default=None, max_length=160)
+    temperature: float | None = Field(default=None, ge=0, le=2)
+    max_tokens: int | None = Field(default=None, gt=0)
+    dimension: int | None = Field(default=None, gt=0)
+    batch_size: int | None = Field(default=None, gt=0)
+
+
+class ModelSettingsResponse(BaseModel):
+    category: Literal["llm", "embedding"]
+    provider: str = ""
+    provider_display_name: str | None = None
+    base_url: str = ""
+    api_key_masked: str = ""
+    model: str = ""
+    configured: bool = False
+    missing_fields: list[str] = Field(default_factory=list)
+    parameters: dict = Field(default_factory=dict)
+    provider_options: list[LLMProviderOption] = Field(default_factory=list)
+
+
+class ModelSettingsUpdateResponse(BaseModel):
+    updated: bool = True
+    settings: ModelSettingsResponse
+
+
+class ModelSettingsResetResponse(BaseModel):
+    reset: bool = True
+    message: str = ""
+
+
+class ModelTestResponse(BaseModel):
+    success: bool
+    model: str = ""
+    latency_ms: int | None = None
+    dimension: int | None = None
+    error: str | None = None
+
+
+class AvailableModelItem(BaseModel):
+    id: str
+    display_name: str = ""
+    capabilities: list[str] = Field(default_factory=list)
+    capability_source: Literal["provider", "heuristic", "unverified"] = "unverified"
+    dimension: int | None = None
+
+
+class AvailableModelsResponse(BaseModel):
+    category: Literal["llm", "embedding"]
+    models: list[AvailableModelItem] = Field(default_factory=list)
+    source: Literal["provider", "examples"] = "examples"
+    warnings: list[str] = Field(default_factory=list)
+
+
+class ModelConfigSummary(BaseModel):
+    category: Literal["llm", "embedding"]
+    provider: str = ""
+    model: str = ""
+    base_url: str = ""
+    api_key_masked: str = ""
+    configured: bool = False
+    missing_fields: list[str] = Field(default_factory=list)
+
+
+class ModelConfigListResponse(BaseModel):
+    items: list[ModelConfigSummary] = Field(default_factory=list)
+    provider_options: list[LLMProviderOption] = Field(default_factory=list)
 
 
 # === Ontology endpoints (Phase 8) ===

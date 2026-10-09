@@ -4,14 +4,15 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import re
 import time
-from contextlib import nullcontext
 from collections.abc import Callable
+from contextlib import nullcontext
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, TypeVar
 
 from pydantic_ai.settings import ModelSettings
 
@@ -36,22 +37,20 @@ from app.llm.prompts import (
     STEP4_KNOWLEDGE_LOCATE,
 )
 from app.llm.schemas import (
+    MAX_CARD_CONCEPTS,
+    MAX_CARD_WIKILINKS,
+    MAX_MAP_KEY_RELATIONS,
+    STEP2_MAX_CANDIDATE_CARDS,
     CardFilterResult,
     CardOutput,
     DocClassification,
     KnowledgeLocateResult,
-    KnowledgeMapOutput,
     KnowledgePoint,
     KnowledgePointOutput,
-    MAX_CARD_CONCEPTS,
-    MAX_CARD_WIKILINKS,
-    MAX_MAP_KEY_RELATIONS,
-    MAX_RELATION_CONNECTIONS,
     MapOutput,
     PathDecision,
     RelationDescOutput,
     RelationItem,
-    STEP2_MAX_CANDIDATE_CARDS,
     SourceNoteOutput,
     StructureAnnotationOutput,
 )
@@ -61,16 +60,17 @@ from app.llm.validators import (
     register_step5_card_validators,
     validate_card_output,
 )
+from app.observability import log_event, next_llm_call_id
+from app.pipeline.query_dictionary import refresh_instance_dictionary
 from app.pipeline.relation_builder import (
     clear_wikilink_cache,
-    compute_concept_overlap_for_instance,
     compute_concept_overlap_incremental,
     extract_all_relations,
 )
-from app.pipeline.query_dictionary import refresh_instance_dictionary
 from app.schema.parser import parse_frontmatter, serialize_frontmatter
 from app.schema.validator import SchemaValidator
 from app.shared_infra import (
+    DocumentSizeTier,
     MarkdownStructure,
     extract_key_sections,
     extract_paragraphs,
@@ -82,11 +82,11 @@ from app.shared_infra.truncation import truncate_with_marker
 from app.storage.database import DatabaseBackend
 from app.storage.filesystem import StorageBackend
 from app.storage.indexer import Indexer
-from app.storage.semantic_index import SemanticIndex
 from app.storage.path_utils import normalize_vault_path, validate_upload_filename
-from app.observability import log_event, next_llm_call_id
+from app.storage.semantic_index import SemanticIndex
 
 logger = logging.getLogger(__name__)
+_PointT = TypeVar("_PointT", KnowledgePointOutput, KnowledgePoint)
 
 SOURCE_DIR = "01-资料来源"
 CARD_DIR = "02-知识卡片"
@@ -136,6 +136,10 @@ FATAL_CARD_GENERATION_MARKERS = (
     "cannot schedule new futures after shutdown",
     "event loop is closed",
 )
+GENERIC_CARD_TITLE_MARKERS = (
+    "概述", "背景", "介绍", "步骤", "示例", "案例", "总结", "结论", "附录",
+    "overview", "introduction", "background", "example", "summary", "appendix",
+)
 
 
 @dataclass
@@ -160,6 +164,16 @@ class IngestResult:
         self.non_blocking_warnings: list[str] = []
         self.job_id: str = ""
         self.status: str = "success"
+        self.status_reason: str | None = None
+        self.metrics: dict[str, object] = {
+            "card_count": 0,
+            "entity_candidate_count": 0,
+            "relation_count": 0,
+            "dedup_mode": "disabled",
+            "candidate_count": 0,
+            "merged_count": 0,
+            "rejected_count": 0,
+        }
 
     def add_warning(self, message: str, *, non_blocking: bool = False) -> None:
         self.warnings.append(message)
@@ -178,6 +192,8 @@ class IngestResult:
             "generated_cards": self.generated_cards,
             "generated_maps": self.generated_maps,
             "warnings": self.warnings,
+            "status_reason": self.status_reason,
+            "metrics": self.metrics,
         }
 
 
@@ -495,8 +511,8 @@ class WritePipeline:
         try:
             self.db.execute(
                 """INSERT OR REPLACE INTO ingest_jobs (job_id, instance_id, input_file, status,
-                   created_files, updated_files, warnings, started_at, finished_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                   created_files, updated_files, warnings, metrics_json, started_at, finished_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     final_job_id,
                     instance_id,
@@ -505,6 +521,7 @@ class WritePipeline:
                     json.dumps(result.created_files, ensure_ascii=False),
                     json.dumps(result.updated_files, ensure_ascii=False),
                     json.dumps(result.warnings, ensure_ascii=False),
+                    json.dumps(result.metrics, ensure_ascii=False),
                     started_at,
                     datetime.now(UTC).isoformat(),
                 ),
@@ -528,6 +545,7 @@ class WritePipeline:
     ) -> IngestResult:
         """Execute ingestion without changing the public ingest API."""
         result = IngestResult()
+        result.metrics["dedup_mode"] = "semantic" if self.semantic_index else "rule"
         self._current_result = result  # PIT-14: Allow card generation to update status
         self._current_instance_id = instance_id
         language_instruction = self._language_instruction(language)
@@ -657,7 +675,13 @@ class WritePipeline:
                 _check_cancel()
                 _cb(5, "running")
                 card_paths, card_contents = self._step5_generate_cards(
-                    vault_path, markdown, classification, filter_result, source_path, language_instruction
+                    vault_path,
+                    markdown,
+                    doc_structure,
+                    classification,
+                    filter_result,
+                    source_path,
+                    language_instruction,
                 )
                 _cb(5, self._last_card_generation_status, {
                     "card_count": len(card_paths),
@@ -763,13 +787,17 @@ class WritePipeline:
             file_journal.commit()
         except PipelineCancelledException:
             result.status = "cancelled"
+            result.status_reason = "TASK_CANCELLED"
+            if "TASK_CANCELLED" not in result.warnings:
+                result.warnings.append("TASK_CANCELLED")
             file_journal.rollback()
             self._record_job(instance_id, source_path, result, now, job_id)
             raise
         except Exception as e:
             logger.error("Write pipeline failed: %s", e)
             result.status = "failed"
-            result.warnings.append(str(e))
+            result.status_reason = "TASK_FAILED"
+            result.warnings.extend(["TASK_FAILED", str(e)])
             file_journal.rollback()
             self._record_job(instance_id, source_path, result, now, job_id)
         finally:
@@ -1087,7 +1115,7 @@ class WritePipeline:
         # Use headings to generate knowledge points
         for heading in headings[:10]:  # Limit to 10 headings
             # Skip very short or generic headings
-            if len(heading.title.strip()) < 3:
+            if len(heading.title.strip()) < 3 or _is_generic_card_title(heading.title):
                 continue
             points.append(
                 KnowledgePoint(
@@ -1110,6 +1138,7 @@ class WritePipeline:
                     )
                 )
 
+        points = _select_points_for_budget(points, self.settings, structure.size_tier)
         return KnowledgeLocateResult(
             knowledge_points=points,
             total_points=len(points),
@@ -1120,6 +1149,7 @@ class WritePipeline:
         self,
         vault_path: str,
         content: str,
+        structure: MarkdownStructure,
         classification: DocClassification,
         filter_result: CardFilterResult,
         source_path: str,
@@ -1132,13 +1162,14 @@ class WritePipeline:
                 para_range=[0, 0],
                 concepts=[point],
                 extraction_confidence="medium",
+                skeleton_targets=["method"],
             )
             for point in filter_result.selected
         ]
         return self._generate_cards_from_points(
             vault_path,
             content,
-            None,
+            structure,
             classification,
             points,
             source_path,
@@ -1165,6 +1196,8 @@ class WritePipeline:
                 concepts=[kp.name],
                 role="concept",
                 extraction_confidence="medium",
+                skeleton_targets=kp.skeleton_targets or ["method"],
+                skeleton_section_ids=kp.skeleton_section_ids or ([kp.section_id] if kp.section_id else []),
             )
             for kp in knowledge_map.knowledge_points
         ]
@@ -1189,6 +1222,15 @@ class WritePipeline:
         fast_context: str | None = None,
         language_instruction: str = "",
     ) -> tuple[list[str], list[str]]:
+        original_count = len(points)
+        if structure is not None:
+            points = _select_points_for_budget(points, self.settings, structure.size_tier)
+        if self._current_result is not None:
+            current_metrics = self._current_result.metrics
+            current_metrics["candidate_count"] = original_count
+            current_metrics["rejected_count"] = max(0, original_count - len(points))
+            if len(points) < original_count and "WRITE_BUDGET_TRUNCATED" not in self._current_result.warnings:
+                self._current_result.add_warning("WRITE_BUDGET_TRUNCATED", non_blocking=True)
         card_paths: list[str] = []
         card_contents: list[str] = []
         failed_count = 0
@@ -1242,6 +1284,7 @@ class WritePipeline:
                 # Semantic dedup: check if card should merge with existing
                 dedup_action = "create"
                 merge_target_path = ""
+                dedup_reason = ""
                 if self.semantic_index and self._current_instance_id:
                     try:
                         dedup = self._get_deduplicator()
@@ -1250,13 +1293,35 @@ class WritePipeline:
                             new_card_title=card_output.title,
                             new_card_summary=card_output.summary,
                         )
+                        dedup_reason = "semantic threshold"
                     except Exception as e:
                         logger.warning(
-                            "Semantic dedup merge check failed for '%s' (non-critical): %s",
+                            "Semantic dedup merge check failed for '%s'; using rule fallback: %s",
                             card_output.title,
                             e,
                         )
-                        dedup_action = "create"
+                        self.semantic_index = None
+                if not self.semantic_index and self._current_instance_id:
+                    try:
+                        from app.pipeline.semantic_dedup import RuleDeduplicator
+                        rule_dedup = RuleDeduplicator(self.db, self.settings)
+                        dedup_action, merge_target_path, rule_decision = rule_dedup.should_merge_or_create(
+                            self._current_instance_id,
+                            title=card_output.title,
+                            summary=card_output.summary,
+                            concepts=card_output.concepts or point.concepts,
+                        )
+                        dedup_reason = rule_decision.reason
+                        if self._current_result is not None:
+                            self._current_result.metrics["dedup_mode"] = "rule"
+                            if "DEDUP_MODE_RULE" not in self._current_result.warnings:
+                                self._current_result.add_warning("DEDUP_MODE_RULE", non_blocking=True)
+                    except Exception as e:
+                        logger.warning(
+                            "Rule dedup check failed for '%s' (non-critical): %s",
+                            card_output.title,
+                            e,
+                        )
 
                 if dedup_action == "merge" and merge_target_path:
                     # Merge: update existing card's frontmatter with new source and concepts
@@ -1291,6 +1356,9 @@ class WritePipeline:
                         )
                         if self._current_result is not None:
                             self._current_result.updated_files.append(merge_target_path)
+                            self._current_result.metrics["merged_count"] = int(
+                                self._current_result.metrics.get("merged_count", 0)
+                            ) + 1
                         # Skip the rest of the card creation loop iteration
                         continue
                     except Exception as e:
@@ -1303,7 +1371,15 @@ class WritePipeline:
                         dedup_action = "create"
 
                 # If we reach here, action is "create" - proceed as before
-                logger.info("Semantic dedup: creating new card '%s'", card_output.title)
+                logger.info(
+                    "Dedup decision: creating new card '%s' (%s)",
+                    card_output.title,
+                    dedup_reason or "no duplicate",
+                )
+                if self._current_result is not None and dedup_action == "create":
+                    self._current_result.metrics["merged_count"] = int(
+                        self._current_result.metrics.get("merged_count", 0)
+                    )
                 if card_truncated:
                     warning = f"Card '{point.card_title}' output was truncated after retry"
                     warnings.append(warning)
@@ -1731,10 +1807,10 @@ class WritePipeline:
         language_instruction: str,
     ) -> list[RelationItem]:
         allowed_titles = set(card_titles)
-        filtered: list[RelationItem] = []
+        candidates: list[tuple[float, int, RelationItem]] = []
         seen: set[tuple[str, str, str]] = set()
 
-        for connection in output.new_connections:
+        for index, connection in enumerate(output.new_connections):
             source = str(connection.source or "").strip()
             target = str(connection.target or "").strip()
             relation_type = _normalize_relation_type(connection.relation_type)
@@ -1755,18 +1831,24 @@ class WritePipeline:
                 target,
                 language_instruction,
             )
-            filtered.append(
-                RelationItem(
-                    source=source,
-                    target=target,
-                    relation_type=relation_type,
-                    description=description,
+            relation = RelationItem(
+                source=source,
+                target=target,
+                relation_type=relation_type,
+                description=description,
+            )
+            candidates.append(
+                (
+                    _step7_relation_evidence(relation),
+                    index,
+                    relation,
                 )
             )
-            if len(filtered) >= MAX_RELATION_CONNECTIONS:
-                break
 
-        return filtered
+        return _select_relations_by_card_budget(
+            candidates,
+            self.settings.ontology_relation_max_per_card,
+        )
 
     def _fallback_relation_descriptions(
         self,
@@ -1791,16 +1873,19 @@ class WritePipeline:
                 }
             )
 
-        fallback: list[RelationItem] = []
+        candidates: list[tuple[float, int, RelationItem]] = []
+        order = 0
         for left_index, left in enumerate(cards):
             for right in cards[left_index + 1:]:
                 relation = self._build_rule_relation(left, right, language_instruction)
                 if relation is None:
                     continue
-                fallback.append(relation)
-                if len(fallback) >= MAX_RELATION_CONNECTIONS:
-                    return fallback
-        return fallback
+                candidates.append((_step7_relation_evidence(relation), order, relation))
+                order += 1
+        return _select_relations_by_card_budget(
+            candidates,
+            self.settings.ontology_relation_max_per_card,
+        )
 
     def _build_rule_relation(
         self,
@@ -1966,6 +2051,7 @@ class WritePipeline:
             if overlap_count:
                 logger.info("Computed %d concept_overlap relations (incremental)", overlap_count)
         except Exception as e:
+            overlap_count = 0
             logger.warning("Failed to compute concept_overlap (non-critical): %s", e)
 
         clear_wikilink_cache(vault_path)
@@ -2001,15 +2087,37 @@ class WritePipeline:
 
         # Best-effort ontology candidate extraction (non-blocking)
         from app.pipeline.ontology_sync import sync_ontology_candidates
+        entity_count = 0
+        ontology_relation_count = 0
         try:
-            sync_ontology_candidates(
+            ontology_metrics = sync_ontology_candidates(
                 self.db, instance_id, card_paths, card_contents, classification,
             )
+            if isinstance(ontology_metrics, dict):
+                entity_count = int(ontology_metrics.get("entity_candidate_count", 0))
+                ontology_relation_count = int(ontology_metrics.get("relation_count", 0))
         except Exception:
             logger.warning("Ontology sync failed (non-blocking)", exc_info=True)
+            result.add_warning("TASK_METRICS_INCOMPLETE", non_blocking=False)
+
+        relation_count = len(all_relations) + overlap_count + ontology_relation_count
+        result.metrics.update(
+            {
+                "card_count": len(card_paths),
+                "entity_candidate_count": entity_count,
+                "relation_count": relation_count,
+            }
+        )
 
         if result.status != "partial_failed":
             result.status = "partial_failed" if result.has_blocking_warnings() else "success"
+        if result.status == "partial_failed" and not result.status_reason:
+            if "DEDUP_MODE_RULE" in result.warnings:
+                result.status_reason = "DEDUP_MODE_RULE"
+            elif "WRITE_BUDGET_TRUNCATED" in result.warnings:
+                result.status_reason = "WRITE_BUDGET_TRUNCATED"
+            else:
+                result.status_reason = "CARD_GENERATION_PARTIAL"
         self._record_job(instance_id, source_path, result, now, job_id)
 
     def _get_step_budget(self, step_name: str) -> int:
@@ -2558,3 +2666,235 @@ def _build_map_body(
         link = _format_note_link(path, title) if path else _clean_map_text(title)
         body_parts.append(f"- {link} {reason}".strip())
     return "\n".join(body_parts)
+
+def _is_generic_card_title(title: str) -> bool:
+    """判断标题是否只是栏目、步骤或示例等泛化标题。"""
+    normalized = (title or "").strip().casefold()
+    return len(normalized) < 3 or any(marker in normalized for marker in GENERIC_CARD_TITLE_MARKERS)
+
+
+_RELATION_TYPE_EVIDENCE = {
+    "dependency": 4.0,
+    "composition": 3.0,
+    "extension": 2.0,
+    "comparison": 1.0,
+}
+
+
+def _step7_relation_evidence(relation: RelationItem) -> float:
+    """计算规则关系的证据优先级，用于每卡预算内保留最高证据关系。"""
+    score = _RELATION_TYPE_EVIDENCE.get(relation.relation_type, 0.0)
+    description = (relation.description or "").strip()
+    if len(description) >= 24:
+        score += 0.5
+    return score
+
+
+def _select_relations_by_card_budget(
+    candidates: list[tuple[float, int, RelationItem]],
+    max_per_card: int,
+) -> list[RelationItem]:
+    """按端点预算选择最高证据关系，保证每张卡片不超过关系上限。"""
+    if max_per_card <= 0:
+        return []
+
+    # 高证据优先、原始顺序兜底，避免模型输出顺序决定最终关系。
+    ordered = sorted(candidates, key=lambda item: (-item[0], item[1]))
+    degrees: dict[str, int] = {}
+    selected: list[tuple[int, RelationItem]] = []
+    for _score, order, relation in ordered:
+        if (
+            degrees.get(relation.source, 0) >= max_per_card
+            or degrees.get(relation.target, 0) >= max_per_card
+        ):
+            continue
+        degrees[relation.source] = degrees.get(relation.source, 0) + 1
+        degrees[relation.target] = degrees.get(relation.target, 0) + 1
+        selected.append((order, relation))
+    return [relation for _order, relation in sorted(selected, key=lambda item: item[0])]
+
+
+def _card_limit_for_tier(settings: Settings, size_tier: DocumentSizeTier | str | None) -> int:
+    """返回文档规模对应的卡片硬上限。"""
+    tier = getattr(size_tier, "value", size_tier) or "short"
+    mapping = {
+        "tiny": getattr(settings, "card_max_tiny", 1),
+        "short": getattr(settings, "card_max_short", 2),
+        "medium": getattr(settings, "card_max_medium", 4),
+        "long": getattr(settings, "card_max_long", 6),
+        "xlong": getattr(settings, "card_max_xlong", 8),
+    }
+    return int(mapping.get(str(tier), mapping["short"]))
+
+
+def _skeleton_score(point: KnowledgePointOutput | KnowledgePoint) -> float:
+    """根据骨架信号生成可解释的候选排序分。"""
+    score = 0.0
+    key_sentences = getattr(point, "key_sentences", []) or []
+    concepts = getattr(point, "concepts", []) or []
+    reason = getattr(point, "reason", "") or ""
+    section_id = getattr(point, "section_id", 0) or 0
+    confidence = getattr(point, "extraction_confidence", "") or ""
+    if key_sentences:
+        score += min(len(key_sentences), 3) * 0.20
+    if concepts:
+        score += 0.20
+    if reason:
+        score += 0.20
+    if section_id:
+        score += 0.15
+    if confidence == "high":
+        score += 0.10
+    if not _is_generic_card_title(_point_title(point)):
+        score += 0.10
+    return score
+
+
+def _point_title(point: KnowledgePointOutput | KnowledgePoint) -> str:
+    """兼容 Step 2/Step 4 两种候选模型读取标题。"""
+    return str(
+        getattr(point, "card_title", "")
+        or getattr(point, "name", "")
+        or ""
+    ).strip()
+
+
+def _point_section_ids(point: KnowledgePointOutput | KnowledgePoint) -> set[int]:
+    """返回候选映射到核心章节或论证节点的集合。"""
+    section_ids = {
+        int(section_id)
+        for section_id in (getattr(point, "skeleton_section_ids", []) or [])
+        if int(section_id) > 0
+    }
+    section_id = getattr(point, "section_id", 0) or 0
+    if int(section_id) > 0:
+        section_ids.add(int(section_id))
+    return section_ids
+
+
+def _point_skeleton_targets(point: KnowledgePointOutput | KnowledgePoint) -> set[str]:
+    """返回候选声明的骨架目标；旧 Step 4 兼容候选按方法节点处理。"""
+    if isinstance(point, KnowledgePoint):
+        return {"method"}
+    return {
+        str(target).strip()
+        for target in (getattr(point, "skeleton_targets", []) or [])
+        if str(target).strip() in {"core_argument", "method", "key_conclusion", "key_fact"}
+    }
+
+
+def _point_has_skeleton_mapping(point: KnowledgePointOutput | KnowledgePoint) -> bool:
+    """判断候选是否同时具备骨架目标和章节映射。"""
+    if not _point_section_ids(point):
+        return False
+    return bool(_point_skeleton_targets(point))
+
+
+def _skeleton_target_nodes(points: list[_PointT]) -> set[tuple[int, str]]:
+    """生成由章节和目标类型组成的核心骨架节点集合。"""
+    nodes: set[tuple[int, str]] = set()
+    for point in points:
+        if isinstance(point, KnowledgePoint):
+            continue
+        section_ids = _point_section_ids(point)
+        targets = _point_skeleton_targets(point)
+        nodes.update(
+            (section_id, target)
+            for section_id in section_ids
+            for target in targets
+        )
+    return nodes
+
+
+def _select_points_for_budget(
+    points: list[_PointT],
+    settings: Settings,
+    size_tier: DocumentSizeTier | str | None,
+) -> list[_PointT]:
+    """过滤泛化候选、合并同义标题并应用骨架覆盖和卡片硬上限。"""
+    unique: dict[str, _PointT] = {}
+    for point in points:
+        title = _point_title(point)
+        if _is_generic_card_title(title):
+            continue
+        key = (
+            " ".join(sorted(re.findall(r"[\w\u4e00-\u9fff]+", title.casefold())))
+            or title.casefold()
+        )
+        current = unique.get(key)
+        if current is None or _skeleton_score(point) > _skeleton_score(current):
+            unique[key] = point
+    ranked = sorted(
+        (point for point in unique.values() if _point_has_skeleton_mapping(point)),
+        key=_skeleton_score,
+        reverse=True,
+    )
+    limit = _card_limit_for_tier(settings, size_tier)
+    structured = [
+        point
+        for point in ranked
+        if not isinstance(point, KnowledgePoint) and _point_has_skeleton_mapping(point)
+    ]
+    if not ranked or limit <= 0:
+        return []
+    if not structured:
+        return [
+            point for point in ranked if isinstance(point, KnowledgePoint)
+        ][:limit]
+
+    core_sections = {
+        section_id
+        for point in structured
+        for section_id in _point_section_ids(point)
+    }
+    target_nodes = _skeleton_target_nodes(structured)
+    required_sections = max(1, math.ceil(len(core_sections) * 0.8))
+    required_targets = max(1, math.ceil(len(target_nodes) * 0.9))
+    selected: list[_PointT] = []
+    covered: set[int] = set()
+    covered_targets: set[tuple[int, str]] = set()
+    remaining = list(structured)
+    while remaining and (
+        len(covered) < required_sections or len(covered_targets) < required_targets
+    ):
+        best = max(
+            remaining,
+            key=lambda item: (
+                len(
+                    {
+                        (section_id, target)
+                        for section_id in _point_section_ids(item)
+                        for target in _point_skeleton_targets(item)
+                    }
+                    - covered_targets
+                ),
+                len(_point_section_ids(item) - covered),
+                _skeleton_score(item),
+            ),
+        )
+        remaining.remove(best)
+        selected.append(best)
+        covered.update(_point_section_ids(best))
+        covered_targets.update(
+            (section_id, target)
+            for section_id in _point_section_ids(best)
+            for target in _point_skeleton_targets(best)
+        )
+        if len(selected) >= limit:
+            break
+    section_coverage = len(covered) / len(core_sections) if core_sections else 1.0
+    target_coverage = len(covered_targets) / len(target_nodes) if target_nodes else 1.0
+    if section_coverage < 0.8 or target_coverage < 0.9:
+        logger.warning(
+            "Skeleton coverage unsatisfied: sections=%d/%d targets=%d/%d",
+            len(covered),
+            len(core_sections),
+            len(covered_targets),
+            len(target_nodes),
+        )
+        return []
+    for item in [point for point in ranked if point in remaining]:
+        if len(selected) >= limit:
+            break
+        selected.append(item)
+    return selected[:limit]

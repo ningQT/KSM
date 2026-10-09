@@ -17,7 +17,17 @@
     "modelPlaceholder": "输入模型名称",
     "modelExamples": "示例",
     "temperature": "Temperature：{{value}}",
-    "maxTokens": "Max Tokens"
+    "maxTokens": "Max Tokens",
+    "dimension": "向量维度",
+    "batchSize": "批量大小",
+    "getModels": "获取模型",
+    "modelsLoading": "正在获取模型…",
+    "modelsEmpty": "供应商没有返回可用模型",
+    "modelsFailed": "获取模型失败",
+    "capabilitySource": "能力来源",
+    "capabilityProvider": "供应商声明",
+    "capabilityHeuristic": "模型名推断",
+    "capabilityUnverified": "未验证"
   },
   "fieldNames": {
     "provider": "供应商",
@@ -65,5 +75,16 @@
     "model": "模型设置",
     "accounts": "账户管理"
   },
-  "forbidden": "当前账户无权访问系统设置。"
+  "forbidden": "当前账户无权访问系统设置。",
+  "category": {
+    "label": "模型类别",
+    "llm": "LLM 模型",
+    "embedding": "embedding 模型"
+  },
+  "list": {
+    "title": "模型配置列表",
+    "empty": "该类别尚未配置",
+    "configured": "已配置",
+    "unconfigured": "未配置"
+  }
 }

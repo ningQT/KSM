@@ -65,6 +65,20 @@ class Settings(BaseSettings):
     tier_medium_max: int = Field(default=15000, alias="KSM_TIER_MEDIUM_MAX")
     tier_long_max: int = Field(default=50000, alias="KSM_TIER_LONG_MAX")
 
+    # 写入密度与关系质量预算。
+    card_max_tiny: int = Field(default=1, ge=0, alias="KSM_CARD_MAX_TINY")
+    card_max_short: int = Field(default=2, ge=0, alias="KSM_CARD_MAX_SHORT")
+    card_max_medium: int = Field(default=4, ge=0, alias="KSM_CARD_MAX_MEDIUM")
+    card_max_long: int = Field(default=6, ge=0, alias="KSM_CARD_MAX_LONG")
+    card_max_xlong: int = Field(default=8, ge=0, alias="KSM_CARD_MAX_XLONG")
+    entity_candidate_max_per_card: int = Field(default=3, ge=0, alias="KSM_ENTITY_MAX_PER_CARD")
+    entity_candidate_max_per_document: int = Field(default=15, ge=0, alias="KSM_ENTITY_MAX_PER_DOCUMENT")
+    ontology_relation_max_per_card: int = Field(default=2, ge=0, alias="KSM_ONTOLOGY_RELATION_MAX_PER_CARD")
+    concept_overlap_max_per_card: int = Field(default=2, ge=0, alias="KSM_CONCEPT_OVERLAP_MAX_PER_CARD")
+    concept_overlap_min_ratio: float = Field(default=0.35, ge=0.0, le=1.0, alias="KSM_CONCEPT_OVERLAP_MIN_RATIO")
+    rule_dedup_combined_threshold: float = Field(default=0.72, ge=0.0, le=1.0, alias="KSM_RULE_DEDUP_COMBINED_THRESHOLD")
+    rule_dedup_concept_threshold: float = Field(default=0.50, ge=0.0, le=1.0, alias="KSM_RULE_DEDUP_CONCEPT_THRESHOLD")
+
     # Source note frontmatter guard rails.
     source_note_fm_max_chars: int = Field(
         default=5000,
@@ -125,7 +139,7 @@ class Settings(BaseSettings):
     dedup_card_threshold: float = Field(default=0.88, alias="KSM_DEDUP_CARD_THRESHOLD")
     dedup_merge_threshold: float = Field(default=0.90, alias="KSM_DEDUP_MERGE_THRESHOLD")
 
-    model_config = {"env_file": _resolve_env_file(), "extra": "ignore"}
+    model_config = {"env_file": _resolve_env_file(), "extra": "ignore", "populate_by_name": True}
 
     def model_post_init(self, __context: object) -> None:
         """Ensure path fields are absolute after loading from .env."""
@@ -140,13 +154,13 @@ class Settings(BaseSettings):
 
     @property
     def effective_embedding_base_url(self) -> str:
-        """Return embedding_base_url, falling back to llm_base_url when empty."""
-        return self.embedding_base_url if self.embedding_base_url else self.llm_base_url
+        """Return the console-managed embedding base URL without LLM fallback."""
+        return self.embedding_base_url
 
     @property
     def effective_embedding_api_key(self) -> str:
-        """Return embedding_api_key, falling back to llm_api_key when empty."""
-        return self.embedding_api_key if self.embedding_api_key else self.llm_api_key
+        """Return the console-managed embedding API key without LLM fallback."""
+        return self.embedding_api_key
 
 
 @lru_cache
@@ -178,6 +192,15 @@ _LLM_CONSOLE_DEFAULTS = {
     "llm_max_tokens": 4096,
 }
 
+_EMBEDDING_CONSOLE_DEFAULTS = {
+    "embedding_provider": "",
+    "embedding_base_url": "",
+    "embedding_api_key": "",
+    "embedding_model": "",
+    "embedding_dimension": 1536,
+    "embedding_batch_size": 32,
+}
+
 _effective_settings: Settings | None = None
 _settings_lock = threading.Lock()
 
@@ -188,14 +211,15 @@ def _build_effective_settings(db: "DatabaseBackend | None" = None) -> Settings:
     Non-LLM settings still come from the environment. LLM provider credentials are
     blank by default and only become effective when saved from the console.
     """
-    base = Settings().model_copy(update=_LLM_CONSOLE_DEFAULTS)
+    defaults = {**_LLM_CONSOLE_DEFAULTS, **_EMBEDDING_CONSOLE_DEFAULTS}
+    base = Settings().model_copy(update=defaults)
     if db is None:
         return base
 
     try:
-        rows = db.get_settings("llm.")
+        rows = [*db.get_settings("llm."), *db.get_settings("embedding.")]
     except Exception:
-        logger.warning("Failed to read settings from database, using .env defaults")
+        logger.warning("Failed to read settings from database, using console defaults")
         return base
 
     if not rows:
@@ -203,15 +227,18 @@ def _build_effective_settings(db: "DatabaseBackend | None" = None) -> Settings:
 
     override_dict: dict = {}
     for row in rows:
-        # "llm.base_url" → "llm_base_url" to match Settings field names
-        field = "llm_" + row["key"][4:]
+        key = str(row["key"])
+        prefix, _, suffix = key.partition(".")
+        if prefix not in {"llm", "embedding"} or not suffix:
+            continue
+        field = f"{prefix}_{suffix}"
         if field not in Settings.model_fields:
-            logger.warning("Unknown settings field %s (from key %s), skipping", field, row["key"])
+            logger.warning("Unknown settings field %s (from key %s), skipping", field, key)
             continue
         try:
             override_dict[field] = json.loads(row["value"])
         except (json.JSONDecodeError, TypeError):
-            logger.warning("Invalid JSON for settings key %s, skipping", row["key"])
+            logger.warning("Invalid JSON for settings key %s, skipping", key)
 
     if not override_dict:
         return base

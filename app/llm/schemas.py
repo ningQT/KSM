@@ -122,6 +122,9 @@ class KnowledgePointOutput(BaseModel):
     role: str = "concept"
     extraction_confidence: str = "medium"
     reason: str = ""
+    skeleton_targets: list[str] = Field(default_factory=list)
+    skeleton_section_ids: list[int] = Field(default_factory=list)
+    skeleton_score: float = 0.0
 
 
 class KnowledgeMapOutput(BaseModel):
@@ -138,6 +141,8 @@ class KnowledgePoint(BaseModel):
     section_id: int | None = None
     section_title: str | None = None
     estimated_tokens: int = 0
+    skeleton_targets: list[str] = Field(default_factory=list)
+    skeleton_section_ids: list[int] = Field(default_factory=list)
 
 
 class KnowledgeLocateResult(BaseModel):

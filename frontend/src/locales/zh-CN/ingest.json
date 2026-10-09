@@ -41,5 +41,32 @@
     "step6": "知识地图生成",
     "step7": "关系描述",
     "step8": "归档索引"
+  },
+  "preflight": {
+    "llmMissing": "请先在“设置 → 模型设置”中配置 LLM 模型。",
+    "embeddingMissing": "未配置 embedding 模型，将继续使用规则去重并可能影响效果。",
+    "continueRuleDedup": "继续写入（规则去重）",
+    "goToSettings": "返回配置"
+  },
+  "taskList": {
+    "title": "写入任务",
+    "empty": "当前实例还没有写入任务",
+    "loading": "正在加载任务…",
+    "failed": "任务列表加载失败，不影响继续上传",
+    "metricsCards": "卡片",
+    "metricsEntities": "实体",
+    "metricsRelations": "关系",
+    "dedupSemantic": "语义去重",
+    "dedupRule": "规则去重",
+    "dedupDisabled": "未启用去重"
+  },
+  "statusReason": {
+    "WRITE_BUDGET_TRUNCATED": "内容达到写入密度上限",
+    "DEDUP_MODE_RULE": "已使用规则去重",
+    "DEDUP_MODE_DISABLED": "去重未启用",
+    "CARD_GENERATION_PARTIAL": "部分卡片生成未完成",
+    "TASK_METRICS_INCOMPLETE": "任务指标不完整",
+    "TASK_CANCELLED": "任务已取消",
+    "TASK_FAILED": "任务失败"
   }
 }

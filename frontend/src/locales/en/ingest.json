@@ -41,5 +41,32 @@
     "step6": "Knowledge map generation",
     "step7": "Relation description",
     "step8": "Archive and index"
+  },
+  "preflight": {
+    "llmMissing": "Configure an LLM model in Settings > Model settings before writing.",
+    "embeddingMissing": "Embedding is not configured. Rule deduplication will be used and may reduce quality.",
+    "continueRuleDedup": "Continue with rule deduplication",
+    "goToSettings": "Open settings"
+  },
+  "taskList": {
+    "title": "Write tasks",
+    "empty": "No write tasks for this instance yet",
+    "loading": "Loading tasks...",
+    "failed": "Failed to load tasks; uploading is still available",
+    "metricsCards": "Cards",
+    "metricsEntities": "Entities",
+    "metricsRelations": "Relations",
+    "dedupSemantic": "Semantic deduplication",
+    "dedupRule": "Rule deduplication",
+    "dedupDisabled": "Deduplication disabled"
+  },
+  "statusReason": {
+    "WRITE_BUDGET_TRUNCATED": "Write density limit reached",
+    "DEDUP_MODE_RULE": "Rule deduplication was used",
+    "DEDUP_MODE_DISABLED": "Deduplication is disabled",
+    "CARD_GENERATION_PARTIAL": "Some cards were not generated",
+    "TASK_METRICS_INCOMPLETE": "Task metrics are incomplete",
+    "TASK_CANCELLED": "Task cancelled",
+    "TASK_FAILED": "Task failed"
   }
 }

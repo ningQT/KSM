@@ -85,6 +85,7 @@ CREATE TABLE IF NOT EXISTS ingest_jobs /* 写入任务状态表 */ (
     created_files TEXT DEFAULT '[]' /* 本次任务创建的文件路径列表 JSON */,
     updated_files TEXT DEFAULT '[]' /* 本次任务更新的文件路径列表 JSON */,
     warnings TEXT DEFAULT '[]' /* 写入过程警告列表 JSON */,
+    metrics_json TEXT NOT NULL DEFAULT '{}' /* 卡片、实体、关系和去重模式指标 JSON */,
     started_at TEXT NOT NULL /* 任务开始时间，ISO 字符串 */,
     finished_at TEXT /* 任务结束时间，ISO 字符串 */,
     FOREIGN KEY (instance_id) REFERENCES instances(id)

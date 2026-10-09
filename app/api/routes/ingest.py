@@ -17,6 +17,7 @@ from sse_starlette.sse import EventSourceResponse
 
 from app.api.dependencies import (
     ensure_instance_access,
+    get_db,
     get_ingest_service,
     get_ingest_service_for_background,
     require_read_context,
@@ -25,11 +26,16 @@ from app.api.dependencies import (
 from app.api.models import (
     AsyncIngestResponse,
     CancelJobResponse,
+    IngestJobListItem,
+    IngestJobListResponse,
+    IngestJobMetrics,
     IngestJobResponse,
+    IngestPreflightResponse,
     IngestResponse,
     SseTokenResponse,
 )
-from app.config import get_settings
+from app.config import get_effective_settings, get_settings
+from app.core.ingest_service import build_ingest_preflight
 from app.core.job_access import job_access_registry
 from app.exceptions import PipelineCancelledException
 from app.observability import log_event
@@ -59,13 +65,16 @@ _STEP_NAMES = {
 class IngestJobState:
     job_id: str
     instance_id: str
+    input_file: str = ""
     status: str = "pending"
+    status_reason: str | None = None
     cancelled: bool = False
     steps: list[dict] = field(default_factory=list)
     created_files: list[str] = field(default_factory=list)
     generated_cards: list[str] = field(default_factory=list)
     generated_maps: list[str] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
+    metrics: dict = field(default_factory=dict)
     started_at: str | None = None
     finished_at: str | None = None
     sse_subscribers: list = field(default_factory=list)
@@ -154,6 +163,25 @@ async def _read_markdown_upload(file: UploadFile) -> bytes:
     return bytes(content)
 
 
+# --- Model preflight helpers ---
+
+
+def _model_preflight_or_409(*, allow_rule_dedup: bool, legacy_default: bool) -> dict:
+    """检查模型配置并按同步/异步兼容策略处理规则去重确认。"""
+    effective = get_effective_settings(get_db())
+    preflight = build_ingest_preflight(effective)
+    if not preflight["llm_configured"]:
+        raise HTTPException(status_code=409, detail={"code": "LLM_NOT_CONFIGURED", **preflight})
+    if not preflight["embedding_configured"] and not allow_rule_dedup:
+        if legacy_default:
+            return preflight
+        raise HTTPException(
+            status_code=409,
+            detail={"code": "RULE_DEDUP_CONFIRMATION_REQUIRED", **preflight},
+        )
+    return preflight
+
+
 # --- Sync ingest (existing) ---
 
 @router.post("/{instance_id}/ingest", response_model=IngestResponse)
@@ -162,11 +190,13 @@ async def ingest_document(
     file: UploadFile = File(...),
     domain_hint: str | None = Form(None),
     auto_map: bool = Form(True),
+    allow_rule_dedup: bool = Form(True),
     auth=Depends(require_write_context),
 ):
     """Ingest a markdown document into a knowledge base instance (synchronous)."""
     started = time.perf_counter()
     ensure_instance_access(auth, instance_id, write=True)
+    _model_preflight_or_409(allow_rule_dedup=allow_rule_dedup, legacy_default=True)
     filename = _safe_upload_name(file.filename)
     log_event(
         logger,
@@ -243,10 +273,12 @@ async def ingest_async(
     file: UploadFile = File(...),
     domain_hint: str | None = Form(None),
     auto_map: bool = Form(True),
+    allow_rule_dedup: bool = Form(False),
     auth=Depends(require_write_context),
 ):
     """Trigger async ingest, returns job_id for SSE progress tracking."""
     ensure_instance_access(auth, instance_id, write=True)
+    preflight = _model_preflight_or_409(allow_rule_dedup=allow_rule_dedup, legacy_default=False)
     filename = _safe_upload_name(file.filename)
 
     # Check if instance already has a running job
@@ -273,8 +305,10 @@ async def ingest_async(
     job = IngestJobState(
         job_id=job_id,
         instance_id=instance_id,
+        input_file=filename,
         status="pending",
         started_at=now,
+        metrics={"dedup_mode": preflight["dedup_mode"]},
     )
 
     with _jobs_lock:
@@ -409,6 +443,8 @@ async def _run_ingest_background(
                     job.generated_maps = result.generated_maps
                     job.warnings = result.warnings
                     job.status = result.status
+                    job.status_reason = getattr(result, "status_reason", None)
+                    job.metrics = dict(getattr(result, "metrics", {}))
                 log_event(
                     logger,
                     "process.ingest.done",
@@ -501,6 +537,9 @@ async def _run_ingest_background(
                     "generated_cards": job.generated_cards,
                     "generated_maps": job.generated_maps,
                     "warnings": job.warnings,
+                    "metrics": job.metrics,
+                    "status_reason": job.status_reason,
+                    "input_file": job.input_file,
                 }
             _push_event(job, {"event": "job_complete", "data": json.dumps(complete_data)})
 
@@ -520,6 +559,76 @@ async def _run_ingest_background(
 
 
 # --- Job polling ---
+
+@router.get("/{instance_id}/ingest/preflight", response_model=IngestPreflightResponse)
+async def ingest_preflight(instance_id: str, auth=Depends(require_write_context)):
+    """Return non-sensitive model readiness for writing."""
+    ensure_instance_access(auth, instance_id, write=True)
+    return IngestPreflightResponse(**build_ingest_preflight(get_effective_settings(get_db())))
+
+
+@router.get("/{instance_id}/ingest/jobs", response_model=IngestJobListResponse)
+async def list_ingest_jobs(instance_id: str, limit: int = 20, auth=Depends(require_read_context)):
+    """List recent persisted ingest jobs for one instance."""
+    ensure_instance_access(auth, instance_id)
+    bounded_limit = max(1, min(limit, 100))
+    rows = get_db().execute(
+        """SELECT job_id, instance_id, input_file, status, warnings, metrics_json,
+                  started_at, finished_at
+           FROM ingest_jobs WHERE instance_id = ?
+           ORDER BY started_at DESC LIMIT ?""",
+        (instance_id, bounded_limit),
+    )
+    items: dict[str, IngestJobListItem] = {}
+    for row in rows:
+        try:
+            metrics = IngestJobMetrics(**json.loads(row.get("metrics_json") or "{}"))
+        except Exception:
+            metrics = IngestJobMetrics()
+        try:
+            warnings = json.loads(row.get("warnings") or "[]")
+        except Exception:
+            warnings = []
+        status_codes = {
+            "WRITE_BUDGET_TRUNCATED",
+            "DEDUP_MODE_RULE",
+            "DEDUP_MODE_DISABLED",
+            "CARD_GENERATION_PARTIAL",
+            "TASK_METRICS_INCOMPLETE",
+            "TASK_CANCELLED",
+            "TASK_FAILED",
+        }
+        status_reason = next(
+            (str(item) for item in warnings if str(item) in status_codes),
+            None,
+        )
+        items[row["job_id"]] = IngestJobListItem(
+            job_id=row["job_id"],
+            instance_id=row["instance_id"],
+            input_file=row.get("input_file") or "",
+            status=row["status"],
+            status_reason=status_reason,
+            metrics=metrics,
+            warnings=warnings,
+            started_at=row.get("started_at"),
+            finished_at=row.get("finished_at"),
+        )
+    with _jobs_lock:
+        active = [job for job in _active_jobs.values() if job.instance_id == instance_id]
+    for job in active:
+        items[job.job_id] = IngestJobListItem(
+            job_id=job.job_id, instance_id=job.instance_id, input_file=job.input_file,
+            status=job.status, status_reason=job.status_reason,
+            metrics=IngestJobMetrics(**job.metrics) if job.metrics else IngestJobMetrics(),
+            warnings=list(job.warnings), started_at=job.started_at, finished_at=job.finished_at,
+        )
+    ordered = sorted(
+        items.values(),
+        key=lambda item: item.started_at or "",
+        reverse=True,
+    )[:bounded_limit]
+    return IngestJobListResponse(items=ordered, limit=bounded_limit, total=len(ordered))
+
 
 @router.get("/{instance_id}/ingest/jobs/{job_id}", response_model=IngestJobResponse)
 async def get_job_status(instance_id: str, job_id: str, auth=Depends(require_read_context)):
@@ -544,6 +653,9 @@ async def get_job_status(instance_id: str, job_id: str, auth=Depends(require_rea
             generated_cards=list(job.generated_cards),
             generated_maps=list(job.generated_maps),
             warnings=list(job.warnings),
+            metrics=IngestJobMetrics(**job.metrics) if job.metrics else IngestJobMetrics(),
+            status_reason=job.status_reason,
+            input_file=job.input_file,
             started_at=job.started_at,
             finished_at=job.finished_at,
         )

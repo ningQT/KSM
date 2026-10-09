@@ -17,9 +17,11 @@ from app.core.search_lexicon_service import SearchLexiconService
 from app.core.search_service import SearchService
 from app.core.sync_service import SyncService
 from app.llm.client import LLMClient
+from app.llm.embedding import EmbeddingService
 from app.observability import log_event
 from app.storage.indexer import Indexer
 from app.storage.local_backend import LocalStorageBackend
+from app.storage.semantic_index import SemanticIndex
 from app.storage.sqlite_backend import SQLiteBackend
 from app.template.registry import TemplateRegistry
 
@@ -72,8 +74,17 @@ def get_instance_service() -> InstanceService:
 
 
 def get_ingest_service() -> IngestService:
+    db = get_db()
     settings = get_effective_settings()
-    return IngestService(get_db(), get_storage(), get_llm_client(), settings, indexer=get_indexer())
+    semantic_index = SemanticIndex(db, EmbeddingService(settings))
+    return IngestService(
+        db,
+        get_storage(),
+        get_llm_client(),
+        settings,
+        indexer=get_indexer(),
+        semantic_index=semantic_index,
+    )
 
 
 def get_ingest_service_for_background() -> tuple[IngestService, SQLiteBackend]:
@@ -94,7 +105,15 @@ def get_ingest_service_for_background() -> tuple[IngestService, SQLiteBackend]:
     storage = LocalStorageBackend(settings.data_dir)
     llm = get_llm_client()
     indexer = Indexer(db)
-    svc = IngestService(db, storage, llm, settings, indexer=indexer)
+    semantic_index = SemanticIndex(db, EmbeddingService(settings))
+    svc = IngestService(
+        db,
+        storage,
+        llm,
+        settings,
+        indexer=indexer,
+        semantic_index=semantic_index,
+    )
     return svc, db
 
 

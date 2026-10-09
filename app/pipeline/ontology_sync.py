@@ -10,6 +10,7 @@ import logging
 from pathlib import Path
 from typing import Any
 
+from app.config import get_settings
 from app.core.ontology_service import OntologyDuplicateError, OntologyService, _norm_key
 from app.schema.parser import parse_frontmatter
 from app.storage.database import DatabaseBackend
@@ -54,15 +55,13 @@ def sync_ontology_candidates(
     card_paths: list[str],
     card_contents: list[str],
     classification: Any = None,
-) -> None:
-    """Extract ontology candidates from write pipeline output.
-
-    Best-effort: errors are logged and swallowed, never propagated.
-    """
+) -> dict[str, int]:
+    """Extract ontology candidates and return task metrics."""
     try:
-        _do_sync(db, instance_id, card_paths, card_contents, classification)
+        return _do_sync(db, instance_id, card_paths, card_contents, classification)
     except Exception:
         logger.warning("Ontology sync failed for instance %s (non-blocking)", instance_id, exc_info=True)
+        return {"entity_candidate_count": 0, "relation_count": 0}
 
 
 def _do_sync(
@@ -71,14 +70,20 @@ def _do_sync(
     card_paths: list[str],
     card_contents: list[str],
     classification: Any,
-) -> None:
+) -> dict[str, int]:
     from app.pipeline.query_dictionary import invalidate_query_caches
     svc = OntologyService(db, on_change=invalidate_query_caches)
 
     # Track normalized entity name → entity_id for relation resolution.
     entity_map: dict[str, str] = {}
     card_concept_keys: dict[str, set[str]] = {}
+    card_entity_ids_by_path: dict[str, set[str]] = {}
     card_title_keys = _collect_card_title_keys(card_paths, card_contents)
+    relation_count = 0
+    created_entity_count = 0
+    settings = get_settings()
+    per_card_entity_limit = settings.entity_candidate_max_per_card
+    per_document_entity_limit = settings.entity_candidate_max_per_document
 
     # 1. Extract entities from card concepts. Card titles are not entities by default.
     for card_path, card_content in zip(card_paths, card_contents):
@@ -87,7 +92,10 @@ def _do_sync(
         concepts = _extract_concepts(fm)
         concept_keys: set[str] = set()
         concept_names: list[str] = []
+        card_entity_ids: set[str] = set()
         for concept in concepts:
+            if len(card_entity_ids) >= per_card_entity_limit:
+                break
             if not _is_valid_entity_name(concept):
                 continue
             concept_key = _norm_key(concept)
@@ -95,15 +103,19 @@ def _do_sync(
                 continue
             concept_keys.add(concept_key)
             concept_names.append(concept)
-            entity = _get_or_create_entity(
+            entity, created = _get_or_create_entity(
                 svc,
                 instance_id,
                 concept,
                 card_path,
                 confidence=_CONCEPT_CONFIDENCE,
+                allow_create=created_entity_count < per_document_entity_limit,
             )
             if entity is None:
                 continue
+            if created:
+                created_entity_count += 1
+            card_entity_ids.add(entity["id"])
             entity_map[concept_key] = entity["id"]
             _safe_add_entity_link(
                 svc,
@@ -115,16 +127,25 @@ def _do_sync(
                 confidence=_CONCEPT_CONFIDENCE,
             )
         title_text = str(title or "").strip()
-        if _is_valid_title_entity(title_text, concept_keys):
-            title_entity = _get_or_create_entity(
+        title_key = _norm_key(title_text)
+        if (
+            _is_valid_title_entity(title_text, concept_keys)
+            and title_key not in entity_map
+            and len(card_entity_ids) < per_card_entity_limit
+        ):
+            title_entity, created = _get_or_create_entity(
                 svc,
                 instance_id,
                 title_text,
                 card_path,
                 confidence=_CONCEPT_CONFIDENCE,
+                allow_create=created_entity_count < per_document_entity_limit,
             )
             if title_entity is not None:
-                entity_map.setdefault(_norm_key(title_text), title_entity["id"])
+                if created:
+                    created_entity_count += 1
+                card_entity_ids.add(title_entity["id"])
+                entity_map.setdefault(title_key, title_entity["id"])
                 _safe_add_entity_link(
                     svc,
                     instance_id,
@@ -135,7 +156,8 @@ def _do_sync(
                     confidence=_CONCEPT_CONFIDENCE,
                 )
         card_concept_keys[card_path] = concept_keys
-        _create_concept_relations_for_card(
+        card_entity_ids_by_path[card_path] = card_entity_ids
+        relation_count += _create_concept_relations_for_card(
             svc,
             instance_id,
             card_path,
@@ -151,10 +173,14 @@ def _do_sync(
         if not isinstance(rel_descs, list):
             continue
         supplemental_count = 0
+        supplement_limit = max(
+            0,
+            per_card_entity_limit - len(card_entity_ids_by_path.get(card_path, set())),
+        )
         for rel_desc in rel_descs:
             if not isinstance(rel_desc, dict):
                 continue
-            supplemental_count = _process_relation(
+            supplemental_count, created_delta = _process_relation(
                 svc,
                 instance_id,
                 rel_desc,
@@ -163,7 +189,11 @@ def _do_sync(
                 card_concept_keys.get(card_path, set()),
                 card_title_keys,
                 supplemental_count,
+                supplement_limit,
+                created_entity_count,
+                per_document_entity_limit,
             )
+            created_entity_count += created_delta
 
     # 3. Extract domain as entity type from classification
     if classification is not None:
@@ -173,6 +203,11 @@ def _do_sync(
             if type_data is not None:
                 _assign_type_to_entities(svc, instance_id, entity_map, type_data["id"])
 
+    return {
+        "entity_candidate_count": min(created_entity_count, per_document_entity_limit),
+        "relation_count": relation_count,
+    }
+
 
 def _get_or_create_entity(
     svc: OntologyService,
@@ -180,10 +215,17 @@ def _get_or_create_entity(
     name: str,
     card_path: str,
     confidence: float,
-) -> dict[str, Any] | None:
-    """Create an entity, returning None on duplicate or error."""
+    *,
+    allow_create: bool = True,
+) -> tuple[dict[str, Any] | None, bool]:
+    """获取或创建实体，并返回本次是否实际创建了实体。"""
+    existing = _find_entity_by_name(svc, instance_id, name)
+    if existing is not None:
+        return existing, False
+    if not allow_create:
+        return None, False
     try:
-        return svc.create_entity(
+        created = svc.create_entity(
             instance_id,
             name=name,
             description=f"Auto-extracted from {card_path}",
@@ -191,13 +233,14 @@ def _get_or_create_entity(
             confidence=confidence,
             status="candidate",
         )
+        return created, True
     except OntologyDuplicateError:
         # Find existing entity by name
         existing = _find_entity_by_name(svc, instance_id, name)
-        return existing
+        return existing, False
     except Exception:
         logger.debug("Failed to create entity '%s'", name, exc_info=True)
-        return None
+        return None, False
 
 
 def _find_entity_by_name(
@@ -327,15 +370,15 @@ def _create_concept_relations_for_card(
     title: str,
     concepts: list[str],
     entity_map: dict[str, str],
-) -> None:
+) -> int:
     if len(concepts) < 2:
-        return
+        return 0
     hub = _select_relation_hub(title, concepts)
     if hub is None:
-        return
+        return 0
     hub_id = entity_map.get(_norm_key(hub))
     if hub_id is None:
-        return
+        return 0
 
     created = 0
     for concept in concepts:
@@ -360,8 +403,9 @@ def _create_concept_relations_for_card(
             pass
         except Exception:
             logger.debug("Failed to create concept relation %s→%s", hub, concept, exc_info=True)
-        if created >= _MAX_CONCEPT_RELATIONS_PER_CARD:
-            return
+        if created >= min(_MAX_CONCEPT_RELATIONS_PER_CARD, get_settings().ontology_relation_max_per_card):
+            return created
+    return created
 
 
 def _select_relation_hub(title: str, concepts: list[str]) -> str | None:
@@ -386,29 +430,36 @@ def _resolve_or_supplement_entity(
     card_title_keys: set[str],
     existing_id: str | None,
     supplemental_count: int,
-) -> tuple[str | None, int]:
+    supplement_limit: int,
+    created_entity_count: int,
+    per_document_entity_limit: int,
+) -> tuple[str | None, int, int]:
     if existing_id is not None:
-        return existing_id, supplemental_count
+        return existing_id, supplemental_count, 0
 
     key = _norm_key(name)
     if key in card_title_keys:
-        return None, supplemental_count
+        return None, supplemental_count, 0
     if key in concept_keys:
-        return entity_map.get(key), supplemental_count
-    if supplemental_count >= _MAX_RELATION_ENTITY_SUPPLEMENTS_PER_CARD:
-        return None, supplemental_count
+        return entity_map.get(key), supplemental_count, 0
+    if supplemental_count >= min(
+        _MAX_RELATION_ENTITY_SUPPLEMENTS_PER_CARD,
+        supplement_limit,
+    ):
+        return None, supplemental_count, 0
     if not _is_valid_entity_name(name):
-        return None, supplemental_count
+        return None, supplemental_count, 0
 
-    entity = _get_or_create_entity(
+    entity, created = _get_or_create_entity(
         svc,
         instance_id,
         name,
         card_path,
         confidence=_RELATION_ENTITY_CONFIDENCE,
+        allow_create=created_entity_count < per_document_entity_limit,
     )
     if entity is None:
-        return None, supplemental_count
+        return None, supplemental_count, 0
 
     entity_map[key] = entity["id"]
     _safe_add_entity_link(
@@ -420,7 +471,7 @@ def _resolve_or_supplement_entity(
         link_type="mention",
         confidence=_RELATION_ENTITY_CONFIDENCE,
     )
-    return entity["id"], supplemental_count + 1
+    return entity["id"], supplemental_count + 1, 1 if created else 0
 
 
 def _process_relation(
@@ -432,7 +483,10 @@ def _process_relation(
     concept_keys: set[str],
     card_title_keys: set[str],
     supplemental_count: int,
-) -> int:
+    supplement_limit: int,
+    created_entity_count: int,
+    per_document_entity_limit: int,
+) -> tuple[int, int]:
     """Process a single relation_description entry."""
     source_name = str(rel_desc.get("source", "") or "").strip()
     target_name = str(rel_desc.get("target", "") or "").strip()
@@ -440,7 +494,7 @@ def _process_relation(
     description = rel_desc.get("description", "")
 
     if not source_name or not target_name:
-        return supplemental_count
+        return supplemental_count, 0
 
     # Map relation type
     ontology_rel_type = _RELATION_TYPE_MAP.get(rel_type, "related_to")
@@ -449,7 +503,7 @@ def _process_relation(
     source_id = entity_map.get(_norm_key(source_name))
     target_id = entity_map.get(_norm_key(target_name))
 
-    source_id, supplemental_count = _resolve_or_supplement_entity(
+    source_id, supplemental_count, source_created = _resolve_or_supplement_entity(
         svc,
         instance_id,
         source_name,
@@ -459,8 +513,11 @@ def _process_relation(
         card_title_keys,
         source_id,
         supplemental_count,
+        supplement_limit,
+        created_entity_count,
+        per_document_entity_limit,
     )
-    target_id, supplemental_count = _resolve_or_supplement_entity(
+    target_id, supplemental_count, target_created = _resolve_or_supplement_entity(
         svc,
         instance_id,
         target_name,
@@ -470,10 +527,14 @@ def _process_relation(
         card_title_keys,
         target_id,
         supplemental_count,
+        supplement_limit,
+        created_entity_count + source_created,
+        per_document_entity_limit,
     )
+    created_delta = source_created + target_created
 
     if source_id is None or target_id is None:
-        return supplemental_count
+        return supplemental_count, created_delta
 
     try:
         svc.create_relation(
@@ -490,7 +551,7 @@ def _process_relation(
         pass
     except Exception:
         logger.debug("Failed to create relation %s→%s", source_name, target_name, exc_info=True)
-    return supplemental_count
+    return supplemental_count, created_delta
 
 
 def _safe_create_type(

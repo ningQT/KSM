@@ -6,7 +6,11 @@ and decide whether to merge or create new cards.
 
 from __future__ import annotations
 
+import json
 import logging
+import re
+from dataclasses import dataclass
+from difflib import SequenceMatcher
 from typing import Any
 
 from app.config import Settings, get_settings
@@ -196,3 +200,146 @@ class SemanticDeduplicator:
         concept_str = ", ".join(concepts) if concepts else ""
         parts = [title, summary, concept_str]
         return "\n".join(parts)
+
+@dataclass(frozen=True)
+class RuleDedupDecision:
+    """规则去重决定。"""
+
+    action: str
+    title_similarity: float
+    concept_jaccard: float
+    summary_overlap: float
+    combined_score: float
+    strong_signal: bool
+    reason: str
+
+
+def _normalize_terms(value: str) -> set[str]:
+    """将中文、英文和数字片段提取为可比较词项。"""
+    return {item.casefold() for item in re.findall(r"[\w\u4e00-\u9fff]+", value or "") if item}
+
+
+def _jaccard(left: set[str], right: set[str]) -> float:
+    """计算两个集合的交并比。"""
+    if not left or not right:
+        return 0.0
+    return len(left & right) / len(left | right)
+
+
+def _text_similarity(left: str, right: str) -> float:
+    """计算标题或别名的归一化相似度。"""
+    return SequenceMatcher(None, (left or "").strip().casefold(), (right or "").strip().casefold()).ratio()
+
+
+def score_rule_dedup(
+    *,
+    title: str,
+    aliases: list[str],
+    concepts: list[str],
+    summary: str,
+    other_title: str,
+    other_aliases: list[str] | None = None,
+    other_concepts: list[str] | None = None,
+    other_summary: str = "",
+    settings: Settings | None = None,
+) -> RuleDedupDecision:
+    """按标题、别名、概念和摘要计算规则去重分数。
+
+    Args:
+        title: 新卡片标题。
+        aliases: 新卡片别名。
+        concepts: 新卡片概念。
+        summary: 新卡片摘要。
+        other_title: 候选卡片标题。
+        other_aliases: 候选卡片别名。
+        other_concepts: 候选卡片概念。
+        other_summary: 候选卡片摘要。
+        settings: 阈值配置。
+
+    Returns:
+        可解释的规则去重决定。
+    """
+    effective = settings or get_settings()
+    left_titles = [title, *aliases]
+    right_titles = [other_title, *(other_aliases or [])]
+    title_similarity = max((_text_similarity(a, b) for a in left_titles for b in right_titles), default=0.0)
+    concept_jaccard = _jaccard(_normalize_terms(" ".join(concepts)), _normalize_terms(" ".join(other_concepts or [])))
+    summary_overlap = _jaccard(_normalize_terms(summary), _normalize_terms(other_summary))
+    combined = 0.45 * title_similarity + 0.35 * concept_jaccard + 0.20 * summary_overlap
+    exact_alias = any(a.strip().casefold() == b.strip().casefold() for a in left_titles for b in right_titles if a and b)
+    strong_signal = exact_alias or (len(_normalize_terms(" ".join(concepts)) & _normalize_terms(" ".join(other_concepts or []))) >= 3 and concept_jaccard >= 0.6)
+    duplicate = strong_signal or (
+        combined >= effective.rule_dedup_combined_threshold
+        and concept_jaccard >= effective.rule_dedup_concept_threshold
+    )
+    reason = "exact alias match" if exact_alias else "strong concept evidence" if strong_signal else "combined threshold" if duplicate else "below threshold"
+    return RuleDedupDecision(
+        action="reject" if duplicate else "create",
+        title_similarity=round(title_similarity, 6),
+        concept_jaccard=round(concept_jaccard, 6),
+        summary_overlap=round(summary_overlap, 6),
+        combined_score=round(combined, 6),
+        strong_signal=strong_signal,
+        reason=reason,
+    )
+
+
+class RuleDeduplicator:
+    """不依赖 embedding 的笔记去重器。"""
+
+    def __init__(self, db: Any, settings: Settings | None = None) -> None:
+        """保存数据库和配置。
+
+        Args:
+            db: 数据库后端。
+            settings: 应用配置。
+        """
+        self._db = db
+        self._settings = settings or get_settings()
+
+    def should_merge_or_create(
+        self,
+        instance_id: str,
+        *,
+        title: str,
+        summary: str,
+        concepts: list[str],
+    ) -> tuple[str, str, RuleDedupDecision]:
+        """返回规则去重的 merge/create 决定。"""
+        rows = self._db.execute(
+            "SELECT file_path, frontmatter FROM notes WHERE instance_id = ? AND graph_layer = 2",
+            (instance_id,),
+        )
+        best_path = ""
+        best_decision = score_rule_dedup(
+            title=title,
+            aliases=[],
+            concepts=concepts,
+            summary=summary,
+            other_title="",
+            settings=self._settings,
+        )
+        best_score = -1.0
+        for row in rows:
+            try:
+                frontmatter = json.loads(row.get("frontmatter") or "{}")
+            except (json.JSONDecodeError, TypeError):
+                frontmatter = {}
+            decision = score_rule_dedup(
+                title=title,
+                aliases=[],
+                concepts=concepts,
+                summary=summary,
+                other_title=str(frontmatter.get("title") or ""),
+                other_aliases=[str(v) for v in frontmatter.get("aliases", [])],
+                other_concepts=[str(v) for v in frontmatter.get("concepts", [])],
+                other_summary=str(frontmatter.get("summary") or ""),
+                settings=self._settings,
+            )
+            if decision.combined_score > best_score:
+                best_score = decision.combined_score
+                best_path = str(row["file_path"])
+                best_decision = decision
+        if best_decision.action in {"merge", "reject"} and best_path:
+            return ("merge", best_path, best_decision)
+        return ("create", "", best_decision)

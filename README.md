@@ -15,6 +15,10 @@
 
 ---
 
+<div align="center">
+  <img src="assets/screenshots/dashboard.png" alt="KSM Web Console dashboard with instances, knowledge metrics, and ingest actions" width="100%">
+</div>
+
 ## What is KSM?
 
 KSM is a local-first knowledge service module for AI business systems. It uses Obsidian Vault as the underlying knowledge carrier, processing raw materials into traceable, searchable, and organized structured knowledge nodes through standard directories, frontmatter metadata, Wikilinks, and SQLite indexing.
@@ -25,7 +29,9 @@ KSM is a local-first knowledge service module for AI business systems. It uses O
 |------------|-------------|
 | **Instance Management** | Create and manage isolated knowledge base instances with standard vault directory structure |
 | **Knowledge Writing** | Process Markdown documents into source notes, knowledge cards, and knowledge maps |
-| **Async Ingestion** | SSE-powered 8-step pipeline with real-time progress tracking |
+| **Async Ingestion** | SSE-powered 8-step pipeline with progress, card/entity/relation metrics, and deduplication status |
+| **Write Density Control** | Budget cards, entities, and relations per document so large inputs produce a focused knowledge graph |
+| **Model Configuration** | Configure one LLM model and one embedding model from the Web console, including model discovery |
 | **Relationship Organization** | Parse and index knowledge relationships (source_trace, extracted_from, concept_overlap, etc.) |
 | **Structured Search** | Intent-aware search returning core_hits, related_cards, source_notes, and maps |
 | **Knowledge Graph** | Interactive visualization with React Flow, supporting 3-layer filtering |
@@ -41,19 +47,34 @@ KSM is a local-first knowledge service module for AI business systems. It uses O
 
 ---
 
+## Product Tour
+
+<table>
+  <tr>
+    <td width="50%"><img src="assets/screenshots/graph.png" alt="Interactive knowledge graph"></td>
+    <td width="50%"><img src="assets/screenshots/knowledge.png" alt="Knowledge base browser"></td>
+  </tr>
+  <tr>
+    <td width="50%"><img src="assets/screenshots/ingest.png" alt="Ingest task list with card, entity, relation, and deduplication metrics"></td>
+    <td width="50%"><img src="assets/screenshots/settings.png" alt="LLM and embedding model configuration"></td>
+  </tr>
+</table>
+
+---
+
 ## Quick Start
 
 ### Prerequisites
 
 - Python 3.11+
 - Node.js 18+
-- An LLM API key (OpenAI, Anthropic, or compatible)
+- API access for one LLM provider and one embedding provider (embedding is recommended; rule-based deduplication is used as a fallback)
 
 ### 1. Clone & Setup Backend
 
 ```bash
-git clone https://github.com/yourname/ksm.git
-cd ksm
+git clone https://github.com/ningQT/Knowledge-Service-Module.git
+cd Knowledge-Service-Module
 
 python -m venv .venv
 source .venv/bin/activate  # Windows: .venv\Scripts\activate
@@ -67,11 +88,7 @@ pip install -r requirements.txt
 uvicorn app.api.app:create_app --factory --host 127.0.0.1 --port 8900
 ```
 
-### 3. Configure LLM
-
-Open http://127.0.0.1:8900/settings in the Web console and configure your LLM provider (API key, model, endpoint).
-
-### 4. Start Frontend
+### 3. Start Frontend
 
 ```bash
 cd frontend
@@ -81,6 +98,15 @@ npm run dev
 
 Open http://localhost:5173 in your browser.
 
+### 4. Configure Models
+
+Open http://localhost:5173/settings and configure:
+
+- **LLM model**: used for writing, answer synthesis, and other model-assisted tasks.
+- **Embedding model**: used for semantic deduplication and vector recall.
+
+Model settings are stored in the local database. If no embedding model is configured, ingest continues with rule-based deduplication and shows a warning in the console.
+
 ---
 
 ## Docker Deployment
@@ -89,7 +115,7 @@ Open http://localhost:5173 in your browser.
 docker compose up -d --build
 ```
 
-See [docs/production-deployment.md](docs/production-deployment.md) for production configuration, backup, and rollback procedures.
+Set the required data, port, and security environment variables for your deployment. Model credentials are configured in the Web console.
 
 ---
 
@@ -101,7 +127,7 @@ See [docs/production-deployment.md](docs/production-deployment.md) for productio
 | **Ingestion** | `POST /api/v1/instances/{id}/ingest[/async]` |
 | **Search** | `POST /api/v1/search` |
 | **Graph** | `GET /api/v1/instances/{id}/graph` |
-| **Settings** | `GET/PUT /api/v1/settings/llm` |
+| **Settings** | `GET/PUT /api/v1/settings/models/{category}` |
 
 Interactive docs (when running): http://127.0.0.1:8900/docs
 
@@ -111,12 +137,16 @@ Interactive docs (when running): http://127.0.0.1:8900/docs
 
 | Page | Path | Description |
 |------|------|-------------|
-| Dashboard | `/` | Instance list with statistics |
-| Graph View | `/graph` | Knowledge graph visualization |
-| Ingest | `/ingest` | Document upload with SSE progress |
+| Dashboard | `/` | Instance list with knowledge statistics |
+| Knowledge Base | `/knowledge` | Browse and filter source notes, cards, and maps |
+| Graph View | `/graph` | Interactive 3-layer knowledge graph |
+| Ingest | `/ingest` | Document upload, SSE progress, and write task metrics |
 | Search | `/search` | Structured knowledge search |
+| Search Lexicon | `/search-lexicon` | Query expansion and synonym management |
+| Ontology | `/ontology` | Entity types, relation types, and graph vocabulary |
+| API Management | `/api-management` | API keys and account access control |
 | Note Detail | `/note/:path` | Markdown rendering with metadata |
-| Settings | `/settings` | LLM configuration management |
+| Settings | `/settings` | LLM and embedding model configuration plus account management |
 
 Supports light/dark theme.
 
@@ -124,7 +154,7 @@ Supports light/dark theme.
 
 ## Configuration
 
-LLM settings are managed via the Web console at `/settings` and stored in the database.
+LLM and embedding credentials are managed in the Web console at `/settings` and stored in the local database. Runtime infrastructure settings remain environment-driven.
 
 Key environment variables:
 
@@ -134,7 +164,7 @@ Key environment variables:
 | `KSM_PORT` | No | `8900` | HTTP port |
 | `KSM_ENABLE_DOCS` | No | `true` | Enable `/docs` endpoint |
 
-See [docs/production-deployment.md](docs/production-deployment.md) for the complete list.
+Model credentials are intentionally not managed through `.env`; configure them in the console.
 
 ---
 

@@ -5,11 +5,14 @@ Reference: 检索流程完整设计 v2 Section 10.7
 
 import json
 import logging
+import math
 import re
+from collections import Counter
 from pathlib import Path
 
 import yaml
 
+from app.config import get_settings
 from app.schema.metadata_normalizer import (
     clean_wikilink_target,
     extract_wikilinks_from_value,
@@ -391,21 +394,50 @@ def compute_concept_overlap_batch(
         if concepts:
             node_concepts[normalize_vault_path(note["file_path"])] = concepts
 
-    # Pairwise intersection
+    # 稀有度过滤：跨多数文档出现的宽泛概念不参与重叠建边。
+    settings = get_settings()
+    document_frequency = Counter(concept for concepts in node_concepts.values() for concept in concepts)
+    rarity_cutoff = max(2, math.ceil(len(node_concepts) * 0.5))
+    effective_concepts = {
+        path: {concept for concept in concepts if document_frequency[concept] <= rarity_cutoff}
+        for path, concepts in node_concepts.items()
+    }
+
+    # Pairwise intersection with score, followed by per-node cap.
     paths = list(node_concepts.keys())
-    overlap_relations = []
+    candidates: list[tuple[float, str, str]] = []
     for i in range(len(paths)):
         for j in range(i + 1, len(paths)):
             p1, p2 = paths[i], paths[j]
-            intersection = node_concepts[p1] & node_concepts[p2]
-            if len(intersection) >= 2:
-                overlap_relations.append({
-                    "source_path": normalize_vault_path(p1),
-                    "target_path": normalize_vault_path(p2),
-                    "rel_type": "concept_overlap",
-                })
+            intersection = effective_concepts[p1] & effective_concepts[p2]
+            union = effective_concepts[p1] | effective_concepts[p2]
+            ratio = len(intersection) / len(union) if union else 0.0
+            if len(intersection) >= 2 and ratio >= settings.concept_overlap_min_ratio:
+                candidates.append((len(intersection) * ratio, p1, p2))
 
-    return overlap_relations
+    # 按证据分从高到低选择，并在加入每条边时同时检查两端度数。
+    degrees: dict[str, int] = {}
+    kept_pairs: set[tuple[str, str]] = set()
+    ordered = sorted(candidates, key=lambda item: (-item[0], item[1], item[2]))
+    for _score, p1, p2 in ordered:
+        if (
+            degrees.get(p1, 0) >= settings.concept_overlap_max_per_card
+            or degrees.get(p2, 0) >= settings.concept_overlap_max_per_card
+        ):
+            continue
+        pair = tuple(sorted((p1, p2)))
+        kept_pairs.add(pair)
+        degrees[p1] = degrees.get(p1, 0) + 1
+        degrees[p2] = degrees.get(p2, 0) + 1
+
+    return [
+        {
+            "source_path": normalize_vault_path(p1),
+            "target_path": normalize_vault_path(p2),
+            "rel_type": "concept_overlap",
+        }
+        for p1, p2 in sorted(kept_pairs)
+    ]
 
 
 def compute_concept_overlap_for_instance(

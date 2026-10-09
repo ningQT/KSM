@@ -3,14 +3,15 @@ import { Upload, FileText, Loader2, StopCircle } from 'lucide-react'
 import { canEditCurrentInstance, isInstanceRevisionCurrent, useInstanceStore } from '@/stores/useInstanceStore'
 import { useIngestStore } from '@/stores/useIngestStore'
 import { useSSE } from '@/hooks/useSSE'
-import { ingestAsync, getJob, getJobSSEUrl, createJobSSEToken, cancelJob } from '@/services/ingest'
+import { ingestAsync, getIngestPreflight, getJob, getJobSSEUrl, createJobSSEToken, cancelJob } from '@/services/ingest'
 import { getInstance } from '@/services/instances'
 import { StepProgress } from '@/components/shared/StepProgress'
+import { IngestTaskList } from '@/components/ingest/IngestTaskList'
 import type { IngestStep, Instance } from '@/types/api'
 import { Input } from '@/components/ui/input'
 import { Button } from '@/components/ui/button'
 import { Switch } from '@/components/ui/switch'
-import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from '@/components/ui/dialog'
+import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle, DialogFooter } from '@/components/ui/dialog'
 import { ApiError, formatApiError, formatJobStatus } from '@/lib/i18nFormat'
 import { useTranslation } from 'react-i18next'
 
@@ -57,6 +58,8 @@ export default function IngestPage() {
   const [submitting, setSubmitting] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [cancelOpen, setCancelOpen] = useState(false)
+  const [ruleDedupOpen, setRuleDedupOpen] = useState(false)
+  const [taskRefresh, setTaskRefresh] = useState(0)
   const [cancelling, setCancelling] = useState(false)
   const { t } = useTranslation('ingest')
   // S-04: SSE 轮询回退机制
@@ -103,7 +106,7 @@ export default function IngestPage() {
         cancel()
         setFile(null)
       } else if (event === 'job_complete') {
-        setResult(data as { status: string; created_files: string[]; generated_cards: string[]; generated_maps: string[]; warnings: string[] })
+        setResult(data as { status: string; status_reason: string | null; created_files: string[]; generated_cards: string[]; generated_maps: string[]; warnings: string[]; metrics: import('@/types/api').IngestJobMetrics })
       }
     },
     onError: () => {
@@ -146,10 +149,12 @@ export default function IngestPage() {
         } else if (job.status === 'success' || job.status === 'partial_failed' || job.status === 'failed') {
           setResult({
             status: job.status,
+            status_reason: job.status_reason,
             created_files: job.created_files,
             generated_cards: job.generated_cards,
             generated_maps: job.generated_maps,
             warnings: job.warnings,
+            metrics: job.metrics,
           })
           pollingRef.current = false
           setPolling(false)
@@ -184,7 +189,7 @@ export default function IngestPage() {
     }
   }, [currentJobId, instanceId, jobInstanceId, reset])
 
-  const handleSubmit = useCallback(async () => {
+  const submitIngest = useCallback(async (allowRuleDedup: boolean) => {
     if (!file || !instanceId) return
     const requestRevision = instanceRevision
     setSubmitting(true)
@@ -193,15 +198,38 @@ export default function IngestPage() {
       const { job_id } = await ingestAsync(instanceId, file, {
         domain_hint: domainHint || undefined,
         auto_map: autoMap,
+        allow_rule_dedup: allowRuleDedup,
       })
       if (!isInstanceRevisionCurrent(requestRevision)) return
       setJobId(job_id, instanceId)
+      setTaskRefresh((value) => value + 1)
     } catch (e) {
       if (isInstanceRevisionCurrent(requestRevision)) setError(formatApiError(t, e))
     } finally {
       if (isInstanceRevisionCurrent(requestRevision)) setSubmitting(false)
     }
   }, [file, instanceId, instanceRevision, domainHint, autoMap, setJobId, t])
+
+  const handleSubmit = useCallback(async () => {
+    if (!file || !instanceId) return
+    const requestRevision = instanceRevision
+    setError(null)
+    try {
+      const preflight = await getIngestPreflight(instanceId)
+      if (!isInstanceRevisionCurrent(requestRevision)) return
+      if (!preflight.llm_configured) {
+        setError(t('preflight.llmMissing'))
+        return
+      }
+      if (preflight.requires_rule_dedup_confirmation) {
+        setRuleDedupOpen(true)
+        return
+      }
+      await submitIngest(false)
+    } catch (e) {
+      if (isInstanceRevisionCurrent(requestRevision)) setError(formatApiError(t, e))
+    }
+  }, [file, instanceId, instanceRevision, submitIngest, t])
 
   const handleDrop = useCallback((e: React.DragEvent) => {
     e.preventDefault()
@@ -332,6 +360,8 @@ export default function IngestPage() {
           )}
         </div>
 
+        <IngestTaskList instanceId={instanceId} refreshToken={taskRefresh} />
+
         {/* Progress section */}
         <div className="bg-card rounded-lg border border-border p-4">
           <h3 className="font-medium mb-3">{t('progress.title')}</h3>
@@ -348,6 +378,19 @@ export default function IngestPage() {
           )}
         </div>
       </div>
+
+      <Dialog open={ruleDedupOpen} onOpenChange={setRuleDedupOpen}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>{t('taskList.title')}</DialogTitle>
+            <DialogDescription>{t('preflight.embeddingMissing')}</DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button variant="ghost" onClick={() => setRuleDedupOpen(false)}>{t('preflight.goToSettings')}</Button>
+            <Button onClick={() => { setRuleDedupOpen(false); void submitIngest(true) }}>{t('preflight.continueRuleDedup')}</Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
 
       {/* Cancel confirmation dialog */}
       <Dialog open={cancelOpen} onOpenChange={setCancelOpen}>

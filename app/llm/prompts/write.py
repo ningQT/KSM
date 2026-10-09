@@ -92,7 +92,7 @@ STEP4_KNOWLEDGE_LOCATE = """请在这篇 Markdown 文档中定位可复用知识
 {language_instruction}
 
 返回字段要求：
-- knowledge_points：数组，元素格式为 {{name, section_id, section_title, estimated_tokens}}
+- knowledge_points：数组，元素格式为 {{name, section_id, section_title, estimated_tokens, skeleton_targets}}；skeleton_targets 只能使用 core_argument、method、key_conclusion、key_fact
 - rejected：被拒绝的知识点名称数组
 - total_points：整数
 - density_map：section_id 到 density_score 的映射
@@ -125,6 +125,7 @@ STEP5_GENERATE_CARD = """你是一个知识管理专家。请为以下知识点�
 6. wikilinks 要充分但克制，最多 10 个，只放真正相关的其他知识名；系统会过滤不存在的目标。
 7. summary、sections、relations、sources_text 都不要输出 Obsidian wikilink 语法，不要写 [[...]]；候选链接只能放入 wikilinks 字段。
 8. 来源要明确；如果上下文不足，请如实保持简洁，不要编造。
+9. 只有能够映射到核心论点、方法、关键结论或关键事实的知识点才值得成卡；不得为了凑数生成卡片。
 
 请返回 JSON 格式：
 {{

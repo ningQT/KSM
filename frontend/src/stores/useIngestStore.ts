@@ -1,5 +1,5 @@
 import { create } from 'zustand'
-import type { IngestJob, IngestStep } from '@/types/api'
+import type { IngestJob, IngestJobMetrics, IngestStep } from '@/types/api'
 
 const ACTIVE_JOB_STORAGE_KEY = 'ksm-active-ingest-job'
 
@@ -24,13 +24,10 @@ function readStoredJob(): StoredIngestJob | null {
 function persistStoredJob(job: StoredIngestJob | null): void {
   if (typeof window === 'undefined') return
   try {
-    if (job) {
-      window.sessionStorage.setItem(ACTIVE_JOB_STORAGE_KEY, JSON.stringify(job))
-    } else {
-      window.sessionStorage.removeItem(ACTIVE_JOB_STORAGE_KEY)
-    }
+    if (job) window.sessionStorage.setItem(ACTIVE_JOB_STORAGE_KEY, JSON.stringify(job))
+    else window.sessionStorage.removeItem(ACTIVE_JOB_STORAGE_KEY)
   } catch {
-    // 浏览器未提供 sessionStorage 时，仅保留当前页面内存状态。
+    // 浏览器未提供 sessionStorage 时只保留当前页面内存状态。
   }
 }
 
@@ -51,10 +48,12 @@ interface IngestStore {
   steps: IngestStep[]
   result: {
     status: string
+    status_reason: string | null
     created_files: string[]
     generated_cards: string[]
     generated_maps: string[]
     warnings: string[]
+    metrics: IngestJobMetrics
   } | null
   setJobId: (id: string, instanceId: string) => void
   restoreJob: (job: IngestJob) => void
@@ -66,7 +65,7 @@ interface IngestStore {
 
 const initialSteps: IngestStep[] = Array.from({ length: 8 }, (_, i) => ({
   step: i + 1,
-  name: '', // 步骤名由 StepProgress 组件通过 t() 动态获取
+  name: '',
   status: 'pending' as const,
 }))
 
@@ -90,10 +89,12 @@ export const useIngestStore = create<IngestStore>((set) => ({
       result: terminalStatuses.has(job.status)
         ? {
             status: job.status,
+            status_reason: job.status_reason,
             created_files: job.created_files,
             generated_cards: job.generated_cards,
             generated_maps: job.generated_maps,
             warnings: job.warnings,
+            metrics: job.metrics,
           }
         : null,
     })
@@ -107,22 +108,10 @@ export const useIngestStore = create<IngestStore>((set) => ({
   setResult: (result) => set({ result, status: result?.status || 'completed' }),
   cancel: () => {
     persistStoredJob(null)
-    set({
-      currentJobId: null,
-      jobInstanceId: null,
-      status: 'idle',
-      steps: initialSteps,
-      result: null,
-    })
+    set({ currentJobId: null, jobInstanceId: null, status: 'idle', steps: initialSteps, result: null })
   },
   reset: () => {
     persistStoredJob(null)
-    set({
-      currentJobId: null,
-      jobInstanceId: null,
-      status: 'idle',
-      steps: initialSteps,
-      result: null,
-    })
+    set({ currentJobId: null, jobInstanceId: null, status: 'idle', steps: initialSteps, result: null })
   },
 }))

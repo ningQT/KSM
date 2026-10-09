@@ -1,15 +1,16 @@
 import api from './client'
-import type { IngestJob, CancelJobResponse, SseTokenResponse } from '@/types/api'
+import type { IngestJob, IngestJobList, IngestPreflight, CancelJobResponse, SseTokenResponse } from '@/types/api'
 
 export async function ingestAsync(
   instanceId: string,
   file: File,
-  options?: { domain_hint?: string; auto_map?: boolean }
+  options?: { domain_hint?: string; auto_map?: boolean; allow_rule_dedup?: boolean }
 ): Promise<{ job_id: string; status: string }> {
   const formData = new FormData()
   formData.append('file', file)
   if (options?.domain_hint) formData.append('domain_hint', options.domain_hint)
   if (options?.auto_map !== undefined) formData.append('auto_map', String(options.auto_map))
+  if (options?.allow_rule_dedup !== undefined) formData.append('allow_rule_dedup', String(options.allow_rule_dedup))
 
   return api.post(`instances/${instanceId}/ingest/async`, { body: formData }).json()
 }
@@ -28,4 +29,12 @@ export async function createJobSSEToken(instanceId: string, jobId: string): Prom
 
 export async function cancelJob(instanceId: string, jobId: string): Promise<CancelJobResponse> {
   return api.post(`instances/${instanceId}/ingest/jobs/${jobId}/cancel`).json()
+}
+
+export async function getIngestPreflight(instanceId: string): Promise<IngestPreflight> {
+  return api.get(`instances/${instanceId}/ingest/preflight`).json<IngestPreflight>()
+}
+
+export async function listIngestJobs(instanceId: string, limit = 20): Promise<IngestJobList> {
+  return api.get(`instances/${instanceId}/ingest/jobs?limit=${limit}`).json<IngestJobList>()
 }
