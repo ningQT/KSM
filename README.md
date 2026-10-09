@@ -73,8 +73,8 @@ KSM is a local-first knowledge service module for AI business systems. It uses O
 ### 1. Clone & Setup Backend
 
 ```bash
-git clone https://github.com/ningQT/Knowledge-Service-Module.git
-cd Knowledge-Service-Module
+git clone https://github.com/ningQT/KSM.git
+cd KSM
 
 python -m venv .venv
 source .venv/bin/activate  # Windows: .venv\Scripts\activate

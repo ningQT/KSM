@@ -73,8 +73,8 @@ KSM 是一个面向 AI 业务系统的本地知识服务模块。系统以 Obsid
 ### 1. 克隆并配置后端
 
 ```bash
-git clone https://github.com/ningQT/Knowledge-Service-Module.git
-cd Knowledge-Service-Module
+git clone https://github.com/ningQT/KSM.git
+cd KSM
 
 python -m venv .venv
 source .venv/bin/activate  # Windows: .venv\Scripts\activate
