@@ -13,13 +13,7 @@
   },
   "instance": {
     "placeholder": "选择实例",
-    "readOnly": "当前为只读权限，写操作不可用。",
-    "access": {
-      "admin": "管理员",
-      "owner": "所有者",
-      "edit": "编辑",
-      "read": "只读"
-    }
+    "readOnly": "当前为只读权限，写操作不可用。"
   },
   "language": {
     "en": "EN",

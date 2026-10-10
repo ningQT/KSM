@@ -13,13 +13,7 @@
   },
   "instance": {
     "placeholder": "Select Instance",
-    "readOnly": "Read-only access is active. Write operations are unavailable.",
-    "access": {
-      "admin": "Admin",
-      "owner": "Owner",
-      "edit": "Edit",
-      "read": "Read-only"
-    }
+    "readOnly": "Read-only access is active. Write operations are unavailable."
   },
   "language": {
     "en": "EN",

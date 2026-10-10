@@ -8,10 +8,16 @@ import { listInstances } from '@/services/instances'
 import { useAuthStore } from '@/stores/useAuthStore'
 import { useInstanceStore } from '@/stores/useInstanceStore'
 import type { Instance } from '@/types/api'
-import { Badge } from '@/components/ui/badge'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { useTranslation } from 'react-i18next'
 
+/**
+ * 顶部栏组件。
+ *
+ * 实例选择器只展示实例名，账户类型统一放在右侧账户区域，避免同一权限信息重复出现。
+ *
+ * @returns 顶部栏内容
+ */
 export function AppHeader() {
   const { theme, toggleTheme } = useTheme()
   const { language, toggleLanguage } = useLanguage()
@@ -19,7 +25,6 @@ export function AppHeader() {
   const { instances, instanceId, setInstanceId, setInstances } = useInstanceStore()
   const navigate = useNavigate()
   const { t } = useTranslation('layout')
-  const currentInstance = instances.find((item) => item.id === instanceId)
 
   useEffect(() => {
     if (instances.length > 0) return
@@ -52,6 +57,7 @@ export function AppHeader() {
   return (
     <header className="flex items-center justify-end h-14 px-6 border-b border-border bg-card">
       <div className="flex items-center gap-4">
+        {/* 实例选择器只展示实例名，权限与账户角色不在该区域重复呈现。 */}
         <Select value={instanceId || ''} onValueChange={setInstanceId}>
           <SelectTrigger className="w-[200px]">
             <SelectValue placeholder={t('instance.placeholder')} />
@@ -60,16 +66,10 @@ export function AppHeader() {
             {instances.map((inst: Instance) => (
               <SelectItem key={inst.id} value={inst.id}>
                 {inst.name}
-                {inst.access_level ? ` ? ${t(`instance.access.${inst.access_level}`)}` : ''}
               </SelectItem>
             ))}
           </SelectContent>
         </Select>
-        {currentInstance?.access_level && (
-          <Badge variant={currentInstance.can_edit ? 'secondary' : 'outline'}>
-            {t(`instance.access.${currentInstance.access_level}`)}
-          </Badge>
-        )}
 
         <button
           onClick={toggleLanguage}
