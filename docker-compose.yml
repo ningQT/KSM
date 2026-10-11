@@ -4,17 +4,18 @@ services:
       context: .
       dockerfile: Dockerfile
     environment:
-      KSM_ENV: prod
+      KSM_ENV: ${KSM_ENV:-prod}
       KSM_HOST: 0.0.0.0
       KSM_PORT: 8900
       KSM_DATA_DIR: /app/data/vaults
       KSM_DB_BACKUP_DIR: /app/data/backups
-      KSM_ENABLE_DOCS: "false"
-      KSM_CORS_ORIGINS: http://localhost:8080
-      KSM_CSRF_TRUSTED_ORIGINS: http://localhost:8080
-      KSM_SECURE_COOKIES: "true"
-      KSM_TRUST_PROXY_HEADERS: "true"
-      KSM_REQUIRE_HTTPS_LLM_BASE_URL: "true"
+      KSM_ENABLE_DOCS: ${KSM_ENABLE_DOCS:-false}
+      KSM_CORS_ORIGINS: ${KSM_PUBLIC_SCHEME:-http}://${KSM_PUBLIC_HOST:-localhost}:${KSM_FRONTEND_PORT:-8080}
+      KSM_CSRF_TRUSTED_ORIGINS: ${KSM_PUBLIC_SCHEME:-http}://${KSM_PUBLIC_HOST:-localhost}:${KSM_FRONTEND_PORT:-8080}
+      KSM_SECURE_COOKIES: ${KSM_SECURE_COOKIES:-false}
+      KSM_TRUST_PROXY_HEADERS: ${KSM_TRUST_PROXY_HEADERS:-true}
+      KSM_REQUIRE_HTTPS_LLM_BASE_URL: ${KSM_REQUIRE_HTTPS_LLM_BASE_URL:-false}
+      KSM_LLM_SSRF_PROTECTION: ${KSM_LLM_SSRF_PROTECTION:-true}
     volumes:
       - ksm-data:/app/data
     healthcheck:
@@ -32,7 +33,7 @@ services:
       backend:
         condition: service_healthy
     ports:
-      - "8080:80"
+      - "${KSM_FRONTEND_PORT:-8080}:80"
 
 volumes:
   ksm-data:

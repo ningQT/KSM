@@ -111,11 +111,24 @@ npm run dev
 
 ## Docker 部署
 
+创建部署环境文件，并设置浏览器访问地址和前端端口：
+
+```bash
+cp .env.example .env
+```
+
+```dotenv
+KSM_PUBLIC_HOST=你的服务器IP或域名
+KSM_FRONTEND_PORT=8080
+```
+
+启动服务：
+
 ```bash
 docker compose up -d --build
 ```
 
-部署时请根据环境配置数据目录、端口和安全参数。模型凭据在 Web 控制台中配置。
+使用 HTTPS 时，同时设置 `KSM_PUBLIC_SCHEME=https` 和 `KSM_SECURE_COOKIES=true`。模型凭据在 Web 控制台中配置。
 
 ---
 

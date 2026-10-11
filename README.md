@@ -111,11 +111,24 @@ Model settings are stored in the local database. If no embedding model is config
 
 ## Docker Deployment
 
+Create the deployment environment file and set the public address and frontend port:
+
+```bash
+cp .env.example .env
+```
+
+```dotenv
+KSM_PUBLIC_HOST=your-server-ip-or-domain
+KSM_FRONTEND_PORT=8080
+```
+
+Start the services:
+
 ```bash
 docker compose up -d --build
 ```
 
-Set the required data, port, and security environment variables for your deployment. Model credentials are configured in the Web console.
+For HTTPS, also set `KSM_PUBLIC_SCHEME=https` and `KSM_SECURE_COOKIES=true`. Model credentials are configured in the Web console.
 
 ---
 
